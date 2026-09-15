@@ -1,0 +1,9 @@
+/target
+__pycache__/
+/tests/firmware/build
+/tests/firmware/sdkconfig
+/tests/firmware/sdkconfig.old
+/tests/latency_firmware/build
+/tests/latency_firmware/sdkconfig
+/tests/latency_firmware/sdkconfig.old
+/.artifacts
