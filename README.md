@@ -160,6 +160,26 @@ idf-remote --url http://HOST:9876 --token-file /path/to/token devices
 The service currently uses plain HTTP. Protect remote traffic with SSH, a VPN,
 or another trusted encrypted transport.
 
+## Experimental application gateway
+
+An optional [ESP-IDF component and example](firmware/README.md) multiplex console
+output, JSON commands and device events over ESP32-S3 USB Serial/JTAG. Ordinary
+firmware still uses the existing raw monitor path.
+
+After flashing the example and letting it boot:
+
+```sh
+idf-remote app-connect
+idf-remote app-call echo --params '{"hello":"device"}'
+idf-remote app-call status
+idf-remote monitor
+```
+
+The same worker accepts application calls through Rust `Service::submit_application`
+and `POST /v1/application`. See [the MVP design](docs/GATEWAY-MVP.md) for the
+experimental protocol, API contract and current limits.
+
+
 ## Design and testing
 
 See [Architecture](docs/ARCHITECTURE.md) for the component boundaries and

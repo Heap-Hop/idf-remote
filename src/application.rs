@@ -26,6 +26,8 @@ impl Command {
             !self.method.is_empty() && self.method.len() <= 64,
             "method must be 1..64 bytes"
         );
+        ensure!(!self.method.contains('\0'), "method cannot contain NUL");
+        validate_json(&self.params, 0)?;
         let bytes = serde_json::to_vec(self)?;
         ensure!(
             bytes.len() <= mux::MAX_PAYLOAD,
@@ -33,6 +35,39 @@ impl Command {
         );
         Ok(bytes)
     }
+}
+
+// The MVP firmware uses cJSON: reject values it cannot faithfully round-trip.
+fn validate_json(value: &Value, depth: usize) -> Result<()> {
+    ensure!(depth <= 16, "application JSON nesting exceeds 16 levels");
+    match value {
+        Value::String(text) => ensure!(
+            !text.contains('\0'),
+            "application JSON strings cannot contain NUL; use base64 for binary data"
+        ),
+        Value::Number(number) => ensure!(
+            number
+                .as_f64()
+                .is_some_and(|n| n.abs() <= 9_007_199_254_740_991.0),
+            "application JSON numbers must be within the interoperable 53-bit range; use a string for larger values"
+        ),
+        Value::Array(values) => {
+            for value in values {
+                validate_json(value, depth + 1)?;
+            }
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                ensure!(
+                    !key.contains('\0'),
+                    "application JSON keys cannot contain NUL"
+                );
+                validate_json(value, depth + 1)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -363,6 +398,23 @@ mod tests {
         Command {
             method: "echo".into(),
             params: json!({"x":1}),
+        }
+    }
+    #[test]
+    fn rejects_json_that_firmware_cannot_roundtrip() {
+        for params in [
+            json!({"nested":["a\0b"]}),
+            json!({"value":9007199254740992u64}),
+            json!({"a\0b":1}),
+        ] {
+            assert!(
+                Command {
+                    method: "echo".into(),
+                    params
+                }
+                .payload()
+                .is_err()
+            );
         }
     }
     #[test]

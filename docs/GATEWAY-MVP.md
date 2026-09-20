@@ -5,9 +5,9 @@ control, with console output and application events on the same connection.
 
 ## Incremental plan
 
-- [ ] Versioned framing, bounded decoder and corruption tests.
-- [ ] Optional ESP-IDF component and ESP32-S3 USB Serial/JTAG example.
-- [ ] Host application session library, worker integration, HTTP and CLI.
+- [x] Versioned framing, bounded decoder and corruption tests.
+- [x] Optional ESP-IDF component and ESP32-S3 USB Serial/JTAG example.
+- [x] Host application session library, worker integration, HTTP and CLI.
 - [ ] Real board: flash, negotiate, requests, events and stdio concurrently.
 - [ ] Record measurements, limits and reproducible usage.
 
@@ -58,3 +58,59 @@ Reset restores raw mode. ROM/panic/direct driver writes are outside stdio captur
 unframed bytes terminate a negotiated host session and are shown as raw output.
 Attach the console once at startup, before application tasks/REPLs; direct USB
 writers and independently redirected FILE streams are unsupported.
+
+## Host interface
+
+`POST /v1/application` accepts an `Idempotency-Key` and this JSON:
+
+```json
+{
+  "device_id": "DEVICE_ID",
+  "monitor_baud": 115200,
+  "timeout_ms": 2000,
+  "command": {"method": "echo", "params": {"hello": "device"}}
+}
+```
+
+Omit `command` (or set it to null) to connect explicitly. The response is HTTP
+202 with an ordinary Operation. Poll `/v1/operations/{id}` until completion;
+`result` is handshake identity or the command's JSON response. Application
+errors/timeouts produce failed operations; malformed requests fail admission.
+Same-key retries reuse the retained operation rather than sending another
+command. Existing bounded retention still applies. Busy devices return 409.
+
+The existing `/v1/events` and `/v1/stream` expose `application_connected`,
+`application_disconnected`, `application_event`, `application_protocol_error`,
+and the existing decoded `raw`/`log` events. A command response is in its own
+operation, not consumed from a shared subscription. Monitor stdin uses console
+frames in an application session. Reset/flash invalidates the session before
+opening the bootloader. USB reopen restores monitor transport, not an application
+session: call connect again. Other clients must observe these lifecycle events.
+
+`Service::submit_application` is the embedded counterpart; `get_operation` and
+`application_events` expose results and cursors without an HTTP listener.
+Protocol/session modules are independent of HTTP. The service still resides in
+`server.rs`; moving its generic scheduler into a separate core crate and a
+published remote client SDK are follow-up refactors, not MVP promises.
+
+## JSON profile
+
+The MVP firmware uses cJSON. Strings/keys cannot contain embedded NUL; use base64
+for binary data. Numeric magnitude is limited to 2^53 - 1 (encode larger exact
+integers as strings). Params nesting is limited to 16 levels. These limits are
+validated before submission instead of silently truncating data in firmware.
+Console frames remain byte-oriented and have no JSON restriction.
+
+## Validation status
+
+- Host unit/integration tests cover codec corruption, fragmented I/O, request
+  timeout without replay, stale responses, reset invalidation, and lib/HTTP ownership.
+- Firmware builds with ESP-IDF 5.5.3; portable C codec passes 101 reference vectors.
+- Real ESP32-S3: flash/verify, embedded lib negotiation/echo, stdout/stderr/ESP_LOG
+  capture and application events verified. HTTP negotiation and 100 echo calls
+  also exercised on hardware.
+- Console input exposed a caller-stack overflow; console queue entries now use
+  small dedicated chunks, and the demo task has a 4 KiB stack. Full input/burst/
+  timeout acceptance is pending a USB reconnect after the last flash: the current
+  endpoint stopped responding even to ROM probing. Do not count the smoke suite
+  as passed until `gateway_smoke.py` completes and writes its report.

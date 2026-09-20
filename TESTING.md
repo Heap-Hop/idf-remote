@@ -91,3 +91,26 @@ target/debug/idf-remote --port /dev/cu.usbmodemXXXX \
 ```
 
 Restore known firmware immediately after the test.
+
+## Application gateway MVP
+
+The optional fixture and supported IDF version are in [firmware/README.md](firmware/README.md).
+`cargo test` covers framing, partial reads/writes, timeout/late-response isolation,
+session invalidation and shared lib/HTTP worker ownership. To independently test
+the firmware C codec against reference CRC/framing vectors (requires a C compiler):
+
+```sh
+python3 tests/test_mux_codec.py
+```
+
+`CC` can override the compiler and flags. After flashing the gateway fixture:
+
+```sh
+python3 tests/gateway_smoke.py --url http://127.0.0.1:19876 \
+  --port SERIAL_PORT --usb-serial EXPECTED_SERIAL \
+  --report .artifacts/gateway-smoke.json
+```
+
+This script does not flash. It checks requests, events, all three stdio streams,
+console input, busy/error/timeout handling, log overload, and measures 100 HTTP
+request/response round trips. It requires the disposable gateway demo firmware.
