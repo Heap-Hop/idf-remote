@@ -593,3 +593,29 @@ mod tests {
         assert!(request.validate().is_err());
     }
 }
+
+/// Experimental application protocol: omit command to explicitly negotiate.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationRequest {
+    pub device_id: DeviceId,
+    #[serde(default = "default_baud")]
+    pub monitor_baud: u32,
+    #[serde(default = "default_serial_write_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub command: Option<crate::application::Command>,
+}
+impl ApplicationRequest {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(self.monitor_baud > 0, "monitor baud must be positive");
+        ensure!(
+            (1..=30_000).contains(&self.timeout_ms),
+            "timeout must be 1..30000 ms"
+        );
+        if let Some(command) = &self.command {
+            command.payload()?;
+        }
+        Ok(())
+    }
+}

@@ -63,6 +63,23 @@ enum Command {
         #[arg(long, default_value = "127.0.0.1:9876")]
         bind: std::net::SocketAddr,
     },
+    /// Explicitly negotiate the optional firmware application protocol.
+    AppConnect {
+        #[arg(long, default_value_t = 115200)]
+        monitor_baud: u32,
+        #[arg(long, default_value_t = 2000)]
+        timeout_ms: u64,
+    },
+    /// Call a method on connected application firmware (JSON parameters).
+    AppCall {
+        method: String,
+        #[arg(long, default_value = "null")]
+        params: String,
+        #[arg(long, default_value_t = 115200)]
+        monitor_baud: u32,
+        #[arg(long, default_value_t = 2000)]
+        timeout_ms: u64,
+    },
     /// Query a previously submitted operation.
     Operation { id: String },
     /// List daemon-managed devices without opening or resetting them.
@@ -1096,7 +1113,9 @@ fn run(cli: Cli) -> Result<()> {
     };
     let hardware_command = matches!(
         &cli.command,
-        Command::Probe(_)
+        Command::AppConnect { .. }
+            | Command::AppCall { .. }
+            | Command::Probe(_)
             | Command::Flash { .. }
             | Command::EraseFlash { .. }
             | Command::ReadFlash { .. }
@@ -1116,6 +1135,41 @@ fn run(cli: Cli) -> Result<()> {
             let operation: idf_remote::wire::Operation =
                 http.get(&format!("/v1/operations/{id}"))?;
             write_json(&mut io::stdout().lock(), &operation)?;
+        }
+        Command::AppConnect {
+            monitor_baud,
+            timeout_ms,
+        } => {
+            let request = idf_remote::wire::ApplicationRequest {
+                device_id: http.resolve_device(&selector)?,
+                monitor_baud,
+                timeout_ms,
+                command: None,
+            };
+            request.validate()?;
+            let operation =
+                http.finish(http.post("/v1/application", &request)?, cli.json, &running)?;
+            write_json(&mut io::stdout().lock(), &operation.result)?;
+        }
+        Command::AppCall {
+            method,
+            params,
+            monitor_baud,
+            timeout_ms,
+        } => {
+            let request = idf_remote::wire::ApplicationRequest {
+                device_id: http.resolve_device(&selector)?,
+                monitor_baud,
+                timeout_ms,
+                command: Some(idf_remote::application::Command {
+                    method,
+                    params: serde_json::from_str(&params).context("params must be JSON")?,
+                }),
+            };
+            request.validate()?;
+            let operation =
+                http.finish(http.post("/v1/application", &request)?, cli.json, &running)?;
+            write_json(&mut io::stdout().lock(), &operation.result)?;
         }
         Command::Devices => {
             let response: idf_remote::wire::DevicesResponse = http.get("/v1/devices")?;
