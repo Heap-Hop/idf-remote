@@ -2,6 +2,7 @@
 """Non-flashing real-board application protocol checks; requires the gateway demo."""
 import argparse
 import base64
+import hashlib
 import json
 import pathlib
 import statistics
@@ -68,7 +69,6 @@ def main():
 
     # Input travels as console frames while requests/events use other channels.
     data = b"abc\t\x03\x7f\r"
-    import hashlib
     serial = http("/v1/serial-write", {"device_id": device, "data": base64.b64encode(data).decode(), "sha256": hashlib.sha256(data).hexdigest(), "baud": 115200, "timeout_ms": 2000})
     finish(serial)
     delayed = submit("delay", 1200)
@@ -80,7 +80,8 @@ def main():
     time.sleep(1.05)
     query = urllib.parse.urlencode({"device_id": device, **cursor})
     during = http("/v1/events?" + query)
-    assert any(e["kind"] == "application_event" for e in during["events"])
+    for kind in ("application_event", "log"):
+        assert any(e["kind"] == kind and e["seq"] > delayed["start_cursor"]["after"] for e in during["events"]), f"no {kind} during pending request"
     assert http("/v1/operations/" + delayed["id"])["status"] == "running"
     finish(delayed)
     unknown = finish(submit("not_a_method"), success=False)
@@ -89,6 +90,7 @@ def main():
     assert "outcome unknown" in timed_out["error"]
     time.sleep(0.5)
     assert call("echo", "after timeout") == "after timeout"
+    before_burst = call("status")
     start = time.monotonic()
     assert call("log_burst") == "done"
     burst_ms = (time.monotonic() - start) * 1000
@@ -98,9 +100,11 @@ def main():
     raw = b"".join(base64.b64decode(e["data"]["base64"]) for e in events if e["kind"] == "raw")
     for marker in (b"gateway:", b"printf tick", b"stderr tick", b"stdin:09", b"stdin:03", b"stdin:7f"):
         assert marker in raw, (marker, raw[-2000:])
+    for byte in data:
+        assert f"stdin:{byte:02x}".encode() in raw
     assert not any(e["kind"] == "application_protocol_error" for e in events), "corrupt frame"
     assert status["dropped_control"] == initial_status["dropped_control"], (initial_status, status)
-    report = {"identity": identity, "samples": len(latencies), "http_roundtrip_ms": {"p50": statistics.median(latencies), "p95": sorted(latencies)[94], "max": max(latencies)}, "log_burst_roundtrip_ms": burst_ms, "status_after_burst": status, "checks": ["echo", "stdio capture", "console input", "events during request", "busy admission", "application error", "timeout without replay", "late response isolation", "no corrupt frames"]}
+    report = {"identity": identity, "samples": len(latencies), "http_roundtrip_ms": {"p50": statistics.median(latencies), "p95": sorted(latencies)[94], "max": max(latencies)}, "log_burst_roundtrip_ms": burst_ms, "status_after_burst": status, "burst_drops": {key: status[key] - before_burst[key] for key in ("dropped_console", "dropped_control")}, "checks": ["echo", "stdio capture", "console input", "events during request", "busy admission", "application error", "timeout without replay", "late response isolation", "no corrupt frames"]}
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))

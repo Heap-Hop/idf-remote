@@ -8,8 +8,8 @@ control, with console output and application events on the same connection.
 - [x] Versioned framing, bounded decoder and corruption tests.
 - [x] Optional ESP-IDF component and ESP32-S3 USB Serial/JTAG example.
 - [x] Host application session library, worker integration, HTTP and CLI.
-- [ ] Real board: flash, negotiate, requests, events and stdio concurrently.
-- [ ] Record measurements, limits and reproducible usage.
+- [x] Real board: flash, negotiate, requests, events and stdio concurrently.
+- [x] Record measurements, limits and reproducible usage.
 
 Baseline for this spike: ESP-IDF **5.5.3**, ESP32-S3 native USB Serial/JTAG.
 Android, automatic protocol negotiation, hot switching back to raw, multiple
@@ -110,7 +110,36 @@ Console frames remain byte-oriented and have no JSON restriction.
   capture and application events verified. HTTP negotiation and 100 echo calls
   also exercised on hardware.
 - Console input exposed a caller-stack overflow; console queue entries now use
-  small dedicated chunks, and the demo task has a 4 KiB stack. Full input/burst/
-  timeout acceptance is pending a USB reconnect after the last flash: the current
-  endpoint stopped responding even to ROM probing. Do not count the smoke suite
-  as passed until `gateway_smoke.py` completes and writes its report.
+  small dedicated chunks, and the demo task has a 4 KiB stack. The complete
+  `gateway_smoke.py` suite passed on hardware after USB reconnection, including
+  every input byte, events/logs arriving during a pending request, busy admission,
+  application errors, timeout recovery, late-response isolation and no corrupt
+  frames. CLI `app-call echo` also passed.
+
+### Hardware measurements (2026-09-20)
+
+macOS host and HTTP client on loopback, ESP32-S3 native USB Serial/JTAG,
+ESP-IDF 5.5.3 gateway example. Latest run: 100 sequential echo requests.
+These are end-to-end HTTP operation times with 2 ms result polling, including
+client overhead; they are not wire-only timings or a real-time guarantee.
+
+| Measurement | Result |
+| --- | --- |
+| Echo median | 3.34 ms |
+| Echo P95 | 3.87 ms |
+| Echo maximum | 5.76 ms |
+| 500-line log burst command completion | 47.84 ms |
+| Console chunks dropped during that burst | 54 |
+| Control frames dropped during that burst | 0 |
+
+The bounded console queue deliberately drops chunks under overload. The burst
+result includes executing the application's 500 printf calls, not just queuing
+its response. Local raw reports remain in ignored `.artifacts/gateway-smoke.json`.
+
+### Remaining issue
+
+After one flash during development, the native USB endpoint stopped delivering
+bytes and ROM probing also failed. A physical USB reconnect restored operation;
+only the test daemon held the port. The root cause is still unconfirmed. Do not
+claim unattended flash-to-application recovery is reliable yet. Keep this as a
+follow-up investigation separate from the now-passing application protocol tests.
