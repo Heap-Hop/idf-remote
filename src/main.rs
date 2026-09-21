@@ -36,7 +36,7 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
     /// HTTP server address; hardware commands always use this API.
-    #[arg(long, global = true, default_value = "http://127.0.0.1:9876")]
+    #[arg(long, global = true, default_value = "http://127.0.0.1:38473")]
     url: String,
     /// Bearer token file, for either serve or client commands.
     #[arg(long, global = true)]
@@ -61,7 +61,7 @@ struct Cli {
 enum Command {
     /// Serve dynamically discovered USB devices or restrict to explicit ports.
     Serve {
-        #[arg(long, default_value = "127.0.0.1:9876")]
+        #[arg(long, default_value = "127.0.0.1:38473")]
         bind: std::net::SocketAddr,
     },
     /// Explicitly negotiate the optional firmware application protocol.
@@ -86,12 +86,12 @@ enum Command {
     /// List daemon-managed devices without opening or resetting them.
     Devices,
     /// Validate artifacts without hardware; print a normalized FlashPlan.
-    #[command(group(ArgGroup::new("source").required(true).args(["plan", "build_dir"])))]
+    #[command(group(ArgGroup::new("source").args(["plan", "build_dir"])))]
     Plan(Source),
     /// Actively identify a chip through the ROM loader, then reset it.
     Probe(Port),
     /// Write and verify all segments; reset with the same port at monitor baud.
-    #[command(group(ArgGroup::new("source").required(true).args(["plan", "build_dir"])))]
+    #[command(group(ArgGroup::new("source").args(["plan", "build_dir"])))]
     Flash {
         #[command(flatten)]
         port: Port,
@@ -196,13 +196,13 @@ struct Source {
     #[arg(long)]
     plan: Option<PathBuf>,
     /// ESP-IDF build directory containing flasher_args.json.
-    #[arg(long)]
-    build_dir: Option<PathBuf>,
+    #[arg(long, default_value = "./build")]
+    build_dir: PathBuf,
     /// Flash only these named images from flasher_args.json (repeatable).
-    #[arg(long, requires = "build_dir")]
+    #[arg(long, conflicts_with = "plan")]
     image: Vec<String>,
     /// Compatibility alias for --image app.
-    #[arg(long, requires = "build_dir", conflicts_with = "image")]
+    #[arg(long, conflicts_with_all = ["image", "plan"])]
     app_only: bool,
 }
 
@@ -466,10 +466,7 @@ fn load(source: &Source) -> Result<(FlashPlan, PreparedPlan, Vec<idf_remote::wir
             Vec::new(),
         )
     } else {
-        let base = source
-            .build_dir
-            .as_ref()
-            .context("provide --plan or --build-dir")?;
+        let base = &source.build_dir;
         let selected_images = if source.app_only {
             vec!["app".to_owned()]
         } else {
@@ -2042,6 +2039,28 @@ mod tests {
         };
         assert_eq!(bytes, b"abc\x7f\x03\t");
         assert!(matches!(rx.blocking_recv().unwrap(), MonitorInput::Exit));
+    }
+
+    #[test]
+    fn cli_defaults_match_for_client_server_and_flash() {
+        let cli = Cli::try_parse_from(["idfr", "serve"]).unwrap();
+        let Command::Serve { bind, .. } = cli.command else {
+            panic!("expected serve");
+        };
+        assert_eq!(bind.to_string(), "127.0.0.1:38473");
+        assert_eq!(cli.url, format!("http://{bind}"));
+        let cli = Cli::try_parse_from(["idfr", "flash", "--image", "app"]).unwrap();
+        let Command::Flash { source, .. } = cli.command else {
+            panic!("expected flash");
+        };
+        assert_eq!(source.build_dir, PathBuf::from("./build"));
+        assert_eq!(source.image, ["app"]);
+        assert!(source.plan.is_none());
+        let cli = Cli::try_parse_from(["idfr", "flash", "--plan", "p.json"]).unwrap();
+        let Command::Flash { source, .. } = cli.command else {
+            panic!("expected flash");
+        };
+        assert_eq!(source.plan, Some(PathBuf::from("p.json")));
     }
 
     #[test]

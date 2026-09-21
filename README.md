@@ -28,12 +28,12 @@ On the computer connected to the board:
 idfr serve
 ```
 
-The daemon listens on `127.0.0.1:9876` and discovers USB serial devices dynamically.
+The daemon listens on `127.0.0.1:38473` and discovers USB serial devices dynamically.
 From another terminal, list devices and flash an ESP-IDF build:
 
 ```sh
 idfr devices
-idfr flash --build-dir build --monitor
+idfr flash --monitor
 ```
 
 With one device, selection is automatic. With multiple devices, use the ID from
@@ -49,12 +49,13 @@ Replace `SERIAL_PORT` with a macOS, Linux, or Windows serial address. Use repeat
 
 ## Flash and monitor
 
-Flash imports images and offsets from ESP-IDF's `flasher_args.json`. Select an
-image with `--image`, or provide a portable plan with `--plan`:
+Flash imports images and offsets from `./build/flasher_args.json` by default.
+Use `--build-dir PATH` for another build directory, `--image` to select images,
+or `--plan` for a portable plan:
 
 ```sh
-idfr plan --build-dir build
-idfr flash --build-dir build --image app
+idfr plan
+idfr flash --image app
 idfr flash --plan plan.json --monitor
 ```
 
@@ -80,20 +81,20 @@ flash reads, erasing, log capture, and JSON output.
 For a remote USB host, forward its loopback listener over SSH:
 
 ```sh
-ssh -N -L 9876:127.0.0.1:9876 user@usb-host
+ssh -N -L 38473:127.0.0.1:38473 user@usb-host
 ```
 
 Clients then use the default URL, or an explicit `--url`:
 
 ```sh
-idfr --url http://127.0.0.1:9876 devices
+idfr --url http://127.0.0.1:38473 devices
 ```
 
 Non-loopback listeners require a token file on the host and clients:
 
 ```sh
-idfr --token-file TOKEN_FILE serve --bind 0.0.0.0:9876
-idfr --url http://USB_HOST:9876 --token-file TOKEN_FILE devices
+idfr --token-file TOKEN_FILE serve --bind 0.0.0.0:38473
+idfr --url http://USB_HOST:38473 --token-file TOKEN_FILE devices
 ```
 
 HTTP is unencrypted; use SSH or a trusted encrypted network for remote traffic.

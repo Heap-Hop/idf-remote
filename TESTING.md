@@ -66,7 +66,7 @@ Build and flash the [gateway example](firmware/README.md), then start the daemon
 and run:
 
 ```sh
-python3 tests/gateway_smoke.py --url http://127.0.0.1:9876 \
+python3 tests/gateway_smoke.py --url http://127.0.0.1:38473 \
   --port SERIAL_PORT --usb-serial EXPECTED_SERIAL \
   --report .artifacts/gateway-smoke.json
 ```

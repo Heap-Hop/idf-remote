@@ -225,24 +225,60 @@ fn invalid_wait_and_existing_capture_file_are_rejected_before_reset() {
 }
 
 #[test]
-fn requires_one_artifact_source() {
-    assert!(!command().arg("flash").output().unwrap().status.success());
-    assert!(
-        !command()
-            .args(["flash", "--port", "IDF_REMOTE_TEST_NONEXISTENT_PORT"])
+fn default_build_directory_supports_image_selection() {
+    let project = tempfile::tempdir().unwrap();
+    let fixture = build_fixture();
+    fs::rename(fixture.path(), project.path().join("build")).unwrap();
+    for (args, expected_segments) in [
+        (vec!["plan"], 2),
+        (vec!["plan", "--image", "app"], 1),
+        (vec!["plan", "--app-only"], 1),
+    ] {
+        let output = command()
+            .current_dir(project.path())
+            .args(args)
             .output()
-            .unwrap()
-            .status
-            .success()
-    );
-    assert!(
-        !command()
-            .args(["plan", "--plan", "p.json", "--build-dir", "build"])
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            plan["segments"].as_array().unwrap().len(),
+            expected_segments
+        );
+    }
+    fs::remove_file(project.path().join("build/app.bin")).unwrap();
+    let output = command()
+        .current_dir(project.path())
+        .arg("flash")
+        .output()
+        .unwrap();
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(error.contains("inspect artifact"), "{error}");
+    assert!(!error.contains("connect to idf-remote"), "{error}");
+}
+
+#[test]
+fn explicit_plan_rejects_build_directory_and_image_options() {
+    for subcommand in ["plan", "flash"] {
+        for extra in [
+            vec!["--build-dir", "build"],
+            vec!["--image", "app"],
+            vec!["--app-only"],
+        ] {
+            let output = command()
+                .args([subcommand, "--plan", "p.json"])
+                .args(extra)
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+        }
+    }
 }
 
 #[test]

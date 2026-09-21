@@ -10,7 +10,7 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--url", default="http://127.0.0.1:9876")
+    parser.add_argument("--url", default="http://127.0.0.1:38473")
     parser.add_argument("--detach-usb-serial", required=True)
     parser.add_argument("--detach-marker", required=True)
     parser.add_argument("--unaffected-usb-serial", required=True)

@@ -16,7 +16,7 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--url", default="http://127.0.0.1:9876")
+    parser.add_argument("--url", default="http://127.0.0.1:38473")
     parser.add_argument("--usb-serial", required=True)
     parser.add_argument("--marker", required=True)
     parser.add_argument("--action-timeout", type=float, default=120)
