@@ -102,32 +102,6 @@ fn inspect_artifact(path: &std::path::Path) -> Result<ArtifactMetadata> {
     })
 }
 
-fn write_serial_bytes(serial: &mut dyn SerialIo, data: &[u8], timeout: Duration) -> Result<usize> {
-    let deadline = Instant::now() + timeout;
-    let mut written = 0;
-    while written < data.len() {
-        ensure!(Instant::now() < deadline, "serial write timed out");
-        let end = (written + 4096).min(data.len());
-        match serial.write(&data[written..end]) {
-            Ok(0) => anyhow::bail!("serial write returned zero bytes"),
-            Ok(size) => written += size,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::TimedOut
-                        | io::ErrorKind::WouldBlock
-                        | io::ErrorKind::Interrupted
-                ) =>
-            {
-                thread::sleep(Duration::from_millis(1))
-            }
-            Err(error) => return Err(error).context("write serial payload"),
-        }
-    }
-    serial.flush().context("flush serial payload")?;
-    Ok(written)
-}
-
 #[derive(Clone)]
 pub struct Service {
     inner: Arc<Mutex<Store>>,
@@ -165,6 +139,9 @@ struct DeviceState {
     events: VecDeque<(Event, usize)>,
     event_bytes: usize,
     busy: bool,
+    // At most one request and one console input; all other actions are exclusive.
+    application_pending: bool,
+    input_pending: bool,
     // Only operations that replace the monitor invalidate a read already in flight.
     discard_monitor_read: bool,
     changed: Arc<tokio::sync::Notify>,
@@ -267,12 +244,23 @@ impl Store {
     }
 
     fn push_operation(&mut self, operation: Operation) {
-        while self.operations.len() >= 64 {
-            if let Some(expired) = self.operations.pop_front() {
-                self.idempotency.remove(&expired.request_key);
-                if let Some(artifact) = self.artifacts.remove(&expired.id) {
-                    let _ = std::fs::remove_file(artifact.path);
-                }
+        // Keep in-flight requests even when many inputs finish during a slow call.
+        while self
+            .operations
+            .iter()
+            .filter(|op| op.status != "running")
+            .count()
+            >= 64
+        {
+            let index = self
+                .operations
+                .iter()
+                .position(|op| op.status != "running")
+                .unwrap();
+            let expired = self.operations.remove(index).unwrap();
+            self.idempotency.remove(&expired.request_key);
+            if let Some(artifact) = self.artifacts.remove(&expired.id) {
+                let _ = std::fs::remove_file(artifact.path);
             }
         }
         self.operations.push_back(operation);
@@ -286,6 +274,8 @@ impl DeviceState {
             events: VecDeque::new(),
             event_bytes: 0,
             busy: false,
+            application_pending: false,
+            input_pending: false,
             discard_monitor_read: false,
             changed: Arc::new(tokio::sync::Notify::new()),
             status,
@@ -418,7 +408,7 @@ impl Service {
         let mut receivers = Vec::with_capacity(devices.len());
         for device in devices {
             let device_id = device.id.clone();
-            let (tx, rx) = mpsc::sync_channel(1);
+            let (tx, rx) = mpsc::sync_channel(2);
             ensure!(
                 runtimes
                     .insert(
@@ -606,7 +596,7 @@ impl Service {
             "dynamic device limit of {MAX_MANAGED_DEVICES} reached"
         );
 
-        let (tx, rx) = mpsc::sync_channel(1);
+        let (tx, rx) = mpsc::sync_channel(2);
         self.inner
             .lock()
             .unwrap()
@@ -799,11 +789,24 @@ impl Service {
                 .expect("idempotency records share the operation retention boundary"));
         }
         let device_id = request.device_id.clone();
-        if store.device(&device_id).busy {
+        let app_lane = matches!(
+            action,
+            Action::Application {
+                command: Some(_),
+                ..
+            }
+        );
+        let input_lane = matches!(action, Action::SerialWrite { .. });
+        let state = store.device_mut(&device_id);
+        let compatible = (app_lane && state.input_pending && !state.application_pending)
+            || (input_lane && state.application_pending && !state.input_pending);
+        if state.busy && !compatible {
             return Err(ApiError(StatusCode::CONFLICT, "device_busy".into()));
         }
-        store.device_mut(&device_id).busy = true;
-        store.device_mut(&device_id).discard_monitor_read = !matches!(
+        state.busy = true;
+        state.application_pending |= app_lane;
+        state.input_pending |= input_lane;
+        state.discard_monitor_read = !matches!(
             action,
             Action::SerialWrite { .. } | Action::Application { .. }
         );
@@ -838,9 +841,19 @@ impl Service {
             .is_err()
         {
             let state = store.device_mut(&device_id);
-            state.busy = false;
+            if app_lane {
+                state.application_pending = false;
+            }
+            if input_lane {
+                state.input_pending = false;
+            }
+            state.busy = state.application_pending || state.input_pending;
             state.discard_monitor_read = false;
-            state.status.activity = DeviceActivity::Error;
+            state.status.activity = if state.busy {
+                DeviceActivity::Busy
+            } else {
+                DeviceActivity::Error
+            };
             store.operations.pop_back();
             store.idempotency.remove(&identity.key);
             return Err(ApiError(
@@ -995,32 +1008,84 @@ impl Service {
     fn active_monitor_status(&self, device_id: &DeviceId) -> Option<DeviceStatus> {
         let store = self.inner.lock().unwrap();
         let state = store.device(device_id);
-        (!state.busy
-            && state.status.availability == DeviceAvailability::Available
-            && state.status.activity == DeviceActivity::Monitoring)
+        (state.status.availability == DeviceAvailability::Available
+            && (state.status.activity == DeviceActivity::Monitoring
+                || state.application_pending
+                || state.input_pending))
             .then_some(state.status)
+    }
+
+    fn finish_stream(
+        &self,
+        device_id: &DeviceId,
+        done: Vec<crate::duplex::Completion>,
+        has_reader: bool,
+    ) {
+        if done.is_empty() {
+            return;
+        }
+        let mut store = self.inner.lock().unwrap();
+        for completion in done {
+            let op = store
+                .operations
+                .iter_mut()
+                .find(|op| op.id == completion.key)
+                .expect("running operations are retained");
+            match completion.result {
+                Ok(value) => {
+                    op.status = "succeeded".into();
+                    op.result = Some(value);
+                }
+                Err(error) => {
+                    op.status = "failed".into();
+                    op.error = Some(format!("{error:#}"));
+                }
+            }
+            let op = op.clone();
+            let state = store.device_mut(device_id);
+            match completion.lane {
+                crate::duplex::Lane::Application => state.application_pending = false,
+                crate::duplex::Lane::Input => state.input_pending = false,
+            }
+            state.busy = state.application_pending || state.input_pending;
+            state.discard_monitor_read = false;
+            state.status.activity = if state.busy {
+                DeviceActivity::Busy
+            } else if has_reader {
+                DeviceActivity::Monitoring
+            } else if state.status.activity == DeviceActivity::Reconnecting {
+                DeviceActivity::Reconnecting
+            } else {
+                DeviceActivity::Error
+            };
+            store.emit(
+                device_id,
+                "operation_finished",
+                serde_json::to_value(op).unwrap(),
+            );
+        }
     }
 
     fn worker(&self, device_id: DeviceId, rx: mpsc::Receiver<Job>, running: Arc<AtomicBool>) {
         let mut reader: Option<Box<dyn SerialIo>> = None;
         let mut reader_baud = None;
-        let mut application: Option<crate::application::Session> = None;
+        let mut duplex = crate::duplex::Duplex::default();
         let mut reconnect: Option<MonitorReconnect> = None;
         let mut boot_reopen_at = None;
         let mut decoder = LineDecoder::default();
         let mut buffer = [0; 4096];
         loop {
-            if (reader.is_none()
-                || application
-                    .as_ref()
-                    .is_some_and(|session| !session.is_valid()))
-                && application.take().is_some()
-            {
-                self.emit(
-                    &device_id,
-                    "application_disconnected",
-                    json!({"reason":"transport closed or application session lost"}),
-                );
+            if reader.is_none() && (duplex.session.is_some() || duplex.has_pending()) {
+                let had_session = duplex.session.is_some();
+                let done = duplex.abort("transport closed; outcome unknown (not retried)");
+                self.finish_stream(&device_id, done, false);
+                if had_session {
+                    self.emit(
+                        &device_id,
+                        "application_disconnected",
+                        json!({"reason":"transport closed"}),
+                    );
+                }
             }
             if !running.load(Ordering::Relaxed)
                 && !self.inner.lock().unwrap().device(&device_id).busy
@@ -1029,15 +1094,117 @@ impl Service {
             }
             match rx.try_recv() {
                 Ok(job) => {
+                    if matches!(
+                        job.action,
+                        Action::Application { .. } | Action::SerialWrite { .. }
+                    ) {
+                        let connecting =
+                            matches!(job.action, Action::Application { command: None, .. });
+                        let lane = if matches!(job.action, Action::SerialWrite { .. }) {
+                            crate::duplex::Lane::Input
+                        } else {
+                            crate::duplex::Lane::Application
+                        };
+                        let result = (|| -> Result<()> {
+                            let baud = match &job.action {
+                                Action::SerialWrite { baud, .. } => *baud,
+                                _ => job.request.monitor_baud,
+                            };
+                            ensure!(
+                                !duplex.has_pending() || reader_baud == Some(baud),
+                                "active stream uses a different baud"
+                            );
+                            ensure!(
+                                duplex.session.is_none() || connecting || reader_baud == Some(baud),
+                                "active application uses a different baud"
+                            );
+                            if reader.is_none() || reader_baud != Some(baud) {
+                                if matches!(
+                                    job.action,
+                                    Action::Application {
+                                        command: Some(_),
+                                        ..
+                                    }
+                                ) {
+                                    anyhow::bail!(
+                                        "application not connected; use app-connect first"
+                                    );
+                                }
+                                let device = self
+                                    .refresh_device_blocking(&device_id)
+                                    .map_err(|e| anyhow::anyhow!(e.1))?;
+                                ensure!(
+                                    device.status.availability == DeviceAvailability::Available,
+                                    "device is unavailable: {:?}",
+                                    device.status.availability
+                                );
+                                reader = None;
+                                reader_baud = None;
+                                reader = Some(
+                                    self.backend
+                                        .open(&device_id, true)?
+                                        .into_monitor(baud, false)?,
+                                );
+                                reader_baud = Some(baud);
+                                decoder = LineDecoder::default();
+                            }
+                            match &job.action {
+                                Action::Application {
+                                    command,
+                                    timeout_ms,
+                                } => {
+                                    if connecting && duplex.session.is_some() {
+                                        self.emit(
+                                            &device_id,
+                                            "application_disconnected",
+                                            json!({"reason":"renegotiating"}),
+                                        );
+                                    }
+                                    duplex.start_application(
+                                        job.id.clone(),
+                                        command.as_ref(),
+                                        Duration::from_millis(*timeout_ms),
+                                    )?;
+                                }
+                                Action::SerialWrite {
+                                    data,
+                                    sha256,
+                                    baud,
+                                    timeout_ms,
+                                } => {
+                                    duplex.start_input(
+                                        job.id.clone(),
+                                        data,
+                                        Duration::from_millis(*timeout_ms),
+                                        json!({"written":data.len(),"sha256":sha256,"baud":baud}),
+                                    )?;
+                                }
+                                _ => unreachable!(),
+                            }
+                            Ok(())
+                        })();
+                        if let Err(error) = result {
+                            self.finish_stream(
+                                &device_id,
+                                vec![crate::duplex::Completion {
+                                    key: job.id,
+                                    lane,
+                                    result: Err(error),
+                                }],
+                                reader.is_some(),
+                            );
+                        } else {
+                            reconnect = None;
+                            boot_reopen_at = None;
+                        }
+                        continue;
+                    }
                     reconnect = None;
                     boot_reopen_at = None;
-                    let preserves_monitor = matches!(
-                        job.action,
-                        Action::SerialWrite { .. } | Action::Application { .. }
-                    ) || (matches!(job.action, Action::Monitor)
-                        && application.is_some());
+                    let preserves_monitor =
+                        matches!(job.action, Action::Monitor) && duplex.session.is_some();
                     if !preserves_monitor {
-                        if application.take().is_some() {
+                        if duplex.session.take().is_some() {
                             self.emit(
                                 &device_id,
                                 "application_disconnected",
@@ -1056,18 +1223,7 @@ impl Service {
                     let result = (|| -> Result<Value> {
                         let reuses_monitor = preserves_monitor
                             && reader.is_some()
-                            && matches!(
-                                &job.action,
-                                Action::SerialWrite { baud, .. } if reader_baud == Some(*baud)
-                            );
-                        let reuses_monitor = reuses_monitor
-                            || (preserves_monitor
-                                && reader.is_some()
-                                && reader_baud == Some(job.request.monitor_baud)
-                                && matches!(
-                                    job.action,
-                                    Action::Application { .. } | Action::Monitor
-                                ));
+                            && reader_baud == Some(job.request.monitor_baud);
                         if !reuses_monitor {
                             let device = self
                                 .refresh_device_blocking(&device_id)
@@ -1078,112 +1234,12 @@ impl Service {
                                 device.status.availability
                             );
                         }
-                        if matches!(job.action, Action::Monitor) && application.is_some() {
+                        if matches!(job.action, Action::Monitor) && duplex.session.is_some() {
                             ensure!(
                                 reader_baud == Some(job.request.monitor_baud),
                                 "active application uses a different baud"
                             );
                             return Ok(json!({"monitor":true,"application":true}));
-                        }
-                        if let Action::Application {
-                            command,
-                            timeout_ms,
-                        } = &job.action
-                        {
-                            if let Some(command) = command {
-                                ensure!(
-                                    reader_baud == Some(job.request.monitor_baud),
-                                    "application baud differs; connect again"
-                                );
-                                let session = application
-                                    .as_mut()
-                                    .context("application not connected; use app-connect first")?;
-                                let serial = reader
-                                    .as_mut()
-                                    .context("application transport unavailable")?;
-                                return session.request(
-                                    serial.as_mut(),
-                                    command,
-                                    Duration::from_millis(*timeout_ms),
-                                    &mut |output| {
-                                        self.application_output(&device_id, &mut decoder, output)
-                                    },
-                                );
-                            }
-                            if application.take().is_some() {
-                                self.emit(
-                                    &device_id,
-                                    "application_disconnected",
-                                    json!({"reason":"renegotiating"}),
-                                );
-                            }
-                            if reader.is_none() || reader_baud != Some(job.request.monitor_baud) {
-                                reader = None;
-                                reader = Some(
-                                    self.backend
-                                        .open(&device_id, true)?
-                                        .into_monitor(job.request.monitor_baud, false)?,
-                                );
-                                reader_baud = Some(job.request.monitor_baud);
-                            }
-                            decoder = LineDecoder::default();
-                            let session = crate::application::Session::connect(
-                                reader.as_mut().unwrap().as_mut(),
-                                Duration::from_millis(*timeout_ms),
-                                &mut |output| {
-                                    self.application_output(&device_id, &mut decoder, output)
-                                },
-                            )?;
-                            let info = session.info.clone();
-                            application = Some(session);
-                            self.emit(&device_id, "application_connected", info.clone());
-                            return Ok(info);
-                        }
-                        if let Action::SerialWrite {
-                            data,
-                            sha256,
-                            baud,
-                            timeout_ms,
-                        } = &job.action
-                        {
-                            ensure!(
-                                application.is_none() || reader_baud == Some(*baud),
-                                "active application uses a different baud"
-                            );
-                            if reader.is_none() || reader_baud != Some(*baud) {
-                                reader = None;
-                                reader_baud = None;
-                                decoder = LineDecoder::default();
-                                let session = self.backend.open(&device_id, true)?;
-                                reader = Some(
-                                    session
-                                        .into_monitor(*baud, false)
-                                        .context("open serial monitor for writing")?,
-                                );
-                                reader_baud = Some(*baud);
-                            }
-                            let serial =
-                                reader.as_mut().context("serial monitor is unavailable")?;
-                            if let Some(session) = &mut application {
-                                session.console_input(
-                                    serial.as_mut(),
-                                    data,
-                                    Duration::from_millis(*timeout_ms),
-                                )?;
-                                return Ok(
-                                    json!({"written":data.len(),"sha256":sha256,"baud":baud}),
-                                );
-                            }
-                            let written = write_serial_bytes(
-                                serial.as_mut(),
-                                data,
-                                Duration::from_millis(*timeout_ms),
-                            )?;
-                            return Ok(json!({
-                                "written": written,
-                                "sha256": sha256,
-                                "baud": baud,
-                            }));
                         }
                         let mut session =
                             self.backend.open(&device_id, job.request.no_reset_before)?;
@@ -1264,11 +1320,6 @@ impl Service {
                     })();
                     let mut store = self.inner.lock().unwrap();
                     let succeeded = result.is_ok();
-                    if !succeeded && matches!(job.action, Action::SerialWrite { .. }) {
-                        reader = None;
-                        reader_baud = None;
-                        decoder = LineDecoder::default();
-                    }
                     if !succeeded && let Some(path) = &artifact_path {
                         let _ = std::fs::remove_file(path);
                     }
@@ -1312,6 +1363,27 @@ impl Service {
                 }
                 Err(mpsc::TryRecvError::Disconnected) => break,
                 Err(mpsc::TryRecvError::Empty) => {
+                    if let Some(serial) = &mut reader {
+                        match duplex.tick(serial.as_mut()) {
+                            Ok(done) => self.finish_stream(&device_id, done, true),
+                            Err(error) => {
+                                let had_session = duplex.session.is_some();
+                                let done = duplex.abort(&format!("{error:#}"));
+                                reader = None;
+                                reader_baud = None;
+                                decoder = LineDecoder::default();
+                                self.finish_stream(&device_id, done, false);
+                                if had_session {
+                                    self.emit(
+                                        &device_id,
+                                        "application_disconnected",
+                                        json!({"reason":error.to_string()}),
+                                    );
+                                }
+                                continue;
+                            }
+                        }
+                    }
                     if boot_reopen_at.is_some_and(|deadline| Instant::now() >= deadline) {
                         reader = None;
                         boot_reopen_at = None;
@@ -1340,22 +1412,35 @@ impl Service {
                             }
                             Ok(size) => {
                                 boot_reopen_at = None;
-                                if let Some(session) = &mut application {
-                                    if let Err(error) =
-                                        session.feed(&buffer[..size], &mut |output| {
-                                            self.application_output(
+                                if duplex.session.is_some() {
+                                    let connecting = duplex.connecting();
+                                    match duplex.feed(&buffer[..size], &mut |output| {
+                                        self.application_output(&device_id, &mut decoder, output)
+                                    }) {
+                                        Ok(done) => {
+                                            if connecting
+                                                && duplex
+                                                    .session
+                                                    .as_ref()
+                                                    .is_some_and(|s| s.is_valid())
+                                            {
+                                                self.emit(
+                                                    &device_id,
+                                                    "application_connected",
+                                                    duplex.session.as_ref().unwrap().info.clone(),
+                                                );
+                                            }
+                                            self.finish_stream(&device_id, done, true);
+                                        }
+                                        Err(error) => {
+                                            let done = duplex.abort(&format!("{error:#}"));
+                                            self.finish_stream(&device_id, done, true);
+                                            self.emit(
                                                 &device_id,
-                                                &mut decoder,
-                                                output,
-                                            )
-                                        })
-                                    {
-                                        application = None;
-                                        self.emit(
-                                            &device_id,
-                                            "application_disconnected",
-                                            json!({"reason":error.to_string()}),
-                                        );
+                                                "application_disconnected",
+                                                json!({"reason":error.to_string()}),
+                                            );
+                                        }
                                     }
                                     continue;
                                 }
@@ -4217,6 +4302,16 @@ mod tests {
             error: None,
             artifact: None,
         };
+        let mut active = operation("active".into());
+        active.status = "running".into();
+        store.push_operation(active);
+        store.idempotency.insert(
+            "key-active".into(),
+            IdempotencyRecord {
+                fingerprint: "active-fingerprint".into(),
+                operation_id: "active".into(),
+            },
+        );
         store.push_operation(operation("old".into()));
         store.idempotency.insert(
             "key-old".into(),
@@ -4241,6 +4336,9 @@ mod tests {
             store.push_operation(operation(format!("new-{index}")));
         }
 
+        assert!(store.operations.iter().any(|op| op.id == "active"));
+        assert!(store.idempotency.contains_key("key-active"));
+        assert_eq!(store.operations.len(), 65);
         assert!(!store.artifacts.contains_key("old"));
         assert!(!store.idempotency.contains_key("key-old"));
         assert!(!artifact_path.exists());

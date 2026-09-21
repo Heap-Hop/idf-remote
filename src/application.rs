@@ -121,6 +121,64 @@ fn transient(e: &io::Error) -> bool {
 }
 
 impl Session {
+    pub(crate) fn begin_connect() -> (Self, Frame) {
+        let session = Self {
+            nonce: nonce(),
+            next_request: 1,
+            decoder: mux::Decoder::default(),
+            info: Value::Null,
+            valid: false,
+        };
+        let hello = Frame {
+            kind: mux::HELLO,
+            session: session.nonce,
+            request: 0,
+            payload: vec![],
+        };
+        (session, hello)
+    }
+
+    pub(crate) fn accept_hello(&mut self, info: Value) -> Result<Value> {
+        ensure!(
+            info.get("protocol").and_then(Value::as_u64) == Some(1),
+            "unsupported application protocol"
+        );
+        self.info = info.clone();
+        self.valid = true;
+        Ok(info)
+    }
+
+    pub(crate) fn prepare_request(&mut self, command: &Command) -> Result<Frame> {
+        ensure!(self.valid, "application session lost; connect again");
+        let payload = command.payload()?;
+        let id = self.next_request;
+        self.next_request = id
+            .checked_add(1)
+            .context("request ID exhausted; connect again")?;
+        Ok(Frame {
+            kind: mux::REQUEST,
+            session: self.nonce,
+            request: id,
+            payload,
+        })
+    }
+
+    pub(crate) fn prepare_console(&self, bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
+        ensure!(self.valid, "application session lost; connect again");
+        bytes
+            .chunks(256)
+            .map(|chunk| {
+                Frame {
+                    kind: mux::CONSOLE,
+                    session: self.nonce,
+                    request: 0,
+                    payload: chunk.to_vec(),
+                }
+                .encode()
+            })
+            .collect()
+    }
+
     /// Explicit opt-in: this sends binary protocol bytes to compatible firmware.
     /// The transport must have a short bounded read/write timeout.
     pub fn connect(
@@ -128,30 +186,11 @@ impl Session {
         timeout: Duration,
         emit: &mut impl FnMut(Output),
     ) -> Result<Self> {
-        let mut session = Self {
-            nonce: nonce(),
-            next_request: 1,
-            decoder: mux::Decoder::default(),
-            info: Value::Null,
-            valid: false,
-        };
+        let (mut session, hello) = Self::begin_connect();
         let deadline = Instant::now() + timeout;
-        write_frame(
-            io,
-            &Frame {
-                kind: mux::HELLO,
-                session: session.nonce,
-                request: 0,
-                payload: vec![],
-            },
-            deadline,
-        )?;
-        session.info = session.wait(io, mux::HELLO_ACK, 0, deadline, emit)?;
-        ensure!(
-            session.info.get("protocol").and_then(Value::as_u64) == Some(1),
-            "unsupported application protocol"
-        );
-        session.valid = true;
+        write_frame(io, &hello, deadline)?;
+        let info = session.wait(io, mux::HELLO_ACK, 0, deadline, emit)?;
+        session.accept_hello(info)?;
         Ok(session)
     }
 
@@ -166,24 +205,10 @@ impl Session {
         timeout: Duration,
         emit: &mut impl FnMut(Output),
     ) -> Result<Value> {
-        ensure!(self.valid, "application session lost; connect again");
-        let payload = command.payload()?;
-        let id = self.next_request;
-        self.next_request = self
-            .next_request
-            .checked_add(1)
-            .context("request ID exhausted; connect again")?;
+        let frame = self.prepare_request(command)?;
+        let id = frame.request;
         let deadline = Instant::now() + timeout;
-        if let Err(error) = write_frame(
-            io,
-            &Frame {
-                kind: mux::REQUEST,
-                session: self.nonce,
-                request: id,
-                payload,
-            },
-            deadline,
-        ) {
+        if let Err(error) = write_frame(io, &frame, deadline) {
             self.valid = false;
             return Err(error);
         }
@@ -220,7 +245,7 @@ impl Session {
         self.process(bytes, None, emit).map(|_| ())
     }
 
-    fn process(
+    pub(crate) fn process(
         &mut self,
         bytes: &[u8],
         expected: Option<(u8, u32)>,

@@ -10,7 +10,7 @@ use idf_remote::{
     mux::{self, Decoded, Frame},
     plan::PreparedPlan,
     server::{self, Service},
-    wire::{ApplicationRequest, Operation},
+    wire::{ApplicationRequest, Operation, SerialWriteRequest},
 };
 use serde_json::{Value, json};
 use std::{
@@ -87,9 +87,15 @@ struct Peer {
     decoder: mux::Decoder,
     bytes: VecDeque<u8>,
     deferred: Option<(Instant, Vec<u8>)>,
+    write_blocked: bool,
 }
 impl Write for Peer {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.write_blocked {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        self.write_blocked = true;
+        let bytes = &bytes[..bytes.len().min(7)];
         for item in self.decoder.feed(bytes) {
             if let Decoded::Frame(frame) = item {
                 match frame.kind {
@@ -125,7 +131,12 @@ impl Write for Peer {
                         );
                         let command: Command = serde_json::from_slice(&frame.payload).unwrap();
                         self.deferred = Some((
-                            Instant::now() + Duration::from_millis(100),
+                            Instant::now()
+                                + Duration::from_millis(if command.method == "fast" {
+                                    0
+                                } else {
+                                    500
+                                }),
                             Frame {
                                 kind: mux::RESPONSE,
                                 payload: serde_json::to_vec(&command.params).unwrap(),
@@ -143,11 +154,12 @@ impl Write for Peer {
         Ok(bytes.len())
     }
     fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+        panic!("the worker must not block on drain/flush")
     }
 }
 impl Read for Peer {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.write_blocked = false;
         if self
             .deferred
             .as_ref()
@@ -213,7 +225,7 @@ async fn http_and_embedded_calls_share_one_owner_and_stream_while_busy() {
     let request = ApplicationRequest {
         device_id: descriptor().id,
         monitor_baud: 115200,
-        timeout_ms: 500,
+        timeout_ms: 2000,
         command: None,
     };
     let connected = finish(
@@ -252,14 +264,130 @@ async fn http_and_embedded_calls_share_one_owner_and_stream_while_busy() {
     let replay = service.submit_application(command, "call").await.unwrap();
     assert_eq!(replay.id, op.id);
     // The HTTP executor stays responsive while a worker waits for its response.
-    tokio::time::sleep(Duration::from_millis(15)).await;
-    let events = service
-        .application_events(&descriptor().id, &op.start_cursor)
-        .unwrap();
-    assert!(events.events.iter().any(|e| e.kind == "application_event"));
-    assert!(events.events.iter().any(|e| e.kind == "log"));
+    tokio::time::timeout(Duration::from_millis(200), async {
+        loop {
+            let events = service
+                .application_events(&descriptor().id, &op.start_cursor)
+                .unwrap();
+            if events.events.iter().any(|e| e.kind == "application_event")
+                && events.events.iter().any(|e| e.kind == "log")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(service.get_operation(&op.id).unwrap().status, "running");
+
+    // A console input can finish while the command is still waiting for its
+    // response. Hardware replacement and renegotiation remain exclusive.
+    for path in ["/v1/reset", "/v1/monitor"] {
+        let (status, _) = post(
+            app.clone(),
+            path,
+            &format!("busy-{}", path.rsplit('/').next().unwrap()),
+            json!({"device_id":"fixture"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
+    assert!(
+        service
+            .submit_application(request.clone(), "reconnect-busy")
+            .await
+            .is_err()
+    );
+    // A mismatched baud must fail without disturbing the pending command.
+    let wrong_baud = SerialWriteRequest::from_bytes(descriptor().id, b"bad", 9600, 1000).unwrap();
+    let (status, value) = post(
+        app.clone(),
+        "/v1/serial-write",
+        "wrong-baud",
+        serde_json::to_value(wrong_baud).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(
+        finish(&service, serde_json::from_value(value).unwrap())
+            .await
+            .status,
+        "failed"
+    );
+    let input =
+        SerialWriteRequest::from_bytes(descriptor().id, b"interactive input\n", 115200, 1000)
+            .unwrap();
+    let (status, value) = post(
+        app.clone(),
+        "/v1/serial-write",
+        "input",
+        serde_json::to_value(input).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(
+        finish(&service, serde_json::from_value(value).unwrap())
+            .await
+            .status,
+        "succeeded"
+    );
+    tokio::time::timeout(Duration::from_millis(200), async {
+        loop {
+            let events = service
+                .application_events(&descriptor().id, &op.start_cursor)
+                .unwrap();
+            if events
+                .events
+                .iter()
+                .any(|e| e.kind == "log" && e.data.to_string().contains("interactive input"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(service.get_operation(&op.id).unwrap().status, "running");
     assert_eq!(finish(&service, op).await.result, Some(json!({"value":42})));
+    // Reverse admission: start a request during a backpressured long write.
+    let input =
+        SerialWriteRequest::from_bytes(descriptor().id, &vec![b'x'; 8192], 115200, 3000).unwrap();
+    let (status, value) = post(
+        app.clone(),
+        "/v1/serial-write",
+        "long-input",
+        serde_json::to_value(&input).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let long_input: Operation = serde_json::from_value(value).unwrap();
+    let (status, _) = post(
+        app.clone(),
+        "/v1/serial-write",
+        "second-input",
+        serde_json::to_value(&input).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let quick = ApplicationRequest {
+        command: Some(Command {
+            method: "fast".into(),
+            params: json!("quick"),
+        }),
+        ..request.clone()
+    };
+    let quick = service
+        .submit_application(quick, "during-input")
+        .await
+        .unwrap();
+    assert_eq!(finish(&service, quick).await.result, Some(json!("quick")));
+    assert_eq!(
+        service.get_operation(&long_input.id).unwrap().status,
+        "running"
+    );
+    assert_eq!(finish(&service, long_input).await.status, "succeeded");
     // Re-attaching a monitor must not replace the negotiated session or port.
     let (_, value) = post(
         app.clone(),

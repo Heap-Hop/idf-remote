@@ -8,3 +8,5 @@ pub mod wire;
 
 pub mod application;
 pub mod mux;
+
+mod duplex;

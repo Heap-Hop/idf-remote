@@ -10,6 +10,7 @@ control, with console output and application events on the same connection.
 - [x] Host application session library, worker integration, HTTP and CLI.
 - [x] Real board: flash, negotiate, requests, events and stdio concurrently.
 - [x] Record measurements, limits and reproducible usage.
+- [x] Host duplex scheduling: console input during a pending command, reads during writes.
 
 Baseline for this spike: ESP-IDF **5.5.3**, ESP32-S3 native USB Serial/JTAG.
 Android, automatic protocol negotiation, hot switching back to raw, multiple
@@ -25,8 +26,20 @@ firmware initialization never waits for a host. Flash/reset invalidates the
 session. Reconnect requires explicit application connect and never retries an
 application command: a timeout may mean the command ran but its response was lost.
 
-MVP serializes application requests per device (other calls receive device_busy),
-while console and events continue flowing during the request. The firmware has
+Each device admits one application request and one console input operation at
+once. A slow command does not block monitor keyboard input; logs, events and
+responses keep flowing during long writes. A second request or input receives
+`device_busy`. Connect, monitor attachment, flash and reset remain exclusive.
+
+The worker alternates bounded writes (at most 256 bytes) with reads. Console
+payloads use 256-byte frames; senders switch only between complete frames. The
+transport must use short bounded read/write timeouts. No blocking drain/flush is
+used: input success means bytes were accepted by the driver, not acknowledged by
+the application. Write failures/timeouts fail pending work without replaying it;
+a response timeout does not cancel unrelated console input. Running operations
+are retained while completed-operation history is evicted.
+
+The firmware has
 one TX owner, bounded high-priority control and lower-priority console queues.
 Priority applies between frames, not to bytes already buffered by USB. Overload
 may drop console chunks; counters expose the loss. Control is not hard real time.
@@ -89,6 +102,9 @@ session: call connect again. Other clients must observe these lifecycle events.
 
 `Service::submit_application` is the embedded counterpart; `get_operation` and
 `application_events` expose results and cursors without an HTTP listener.
+These scheduling guarantees apply to the service through both lib and HTTP.
+The low-level `application::Session` convenience methods remain synchronous;
+embedded applications needing concurrent operations should use `Service`.
 Protocol/session modules are independent of HTTP. The service still resides in
 `server.rs`; moving its generic scheduler into a separate core crate and a
 published remote client SDK are follow-up refactors, not MVP promises.
@@ -105,6 +121,11 @@ Console frames remain byte-oriented and have no JSON restriction.
 
 - Host unit/integration tests cover codec corruption, fragmented I/O, request
   timeout without replay, stale responses, reset invalidation, and lib/HTTP ownership.
+- Host duplex regression tests cover a backpressured peer requiring reads to
+  unblock writes, escaped partial frames, replies during long input, console input
+  during a slow HTTP/lib command, baud mismatch isolation, timeouts without replay,
+  disconnect cleanup, and retention of running operations. This scheduling change
+  has host validation only; the hardware measurements below predate it.
 - Firmware builds with ESP-IDF 5.5.3; portable C codec passes 101 reference vectors.
 - Real ESP32-S3: flash/verify, embedded lib negotiation/echo, stdout/stderr/ESP_LOG
   capture and application events verified. HTTP negotiation and 100 echo calls
