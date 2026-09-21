@@ -2,8 +2,7 @@
 
 This optional component lets a local/remote host exchange application commands
 and events while observing normal console output on one USB connection.
-Test baseline: **ESP-IDF 5.5.3**, **ESP32-S3 native USB Serial/JTAG**.
-This is not the USB-OTG/TinyUSB transport or an Android implementation.
+Validated configuration: **ESP-IDF 5.5.3**, **ESP32-S3 native USB Serial/JTAG**.
 
 ## Build and run the example
 
@@ -30,10 +29,9 @@ boots. Before connect, output is ordinary text. After connect, an ordinary
 serial monitor needs a device reset to get plain text again; `idfr monitor`
 uses decoded console bytes and frames its keyboard input automatically.
 
-The example emits ESP_LOGI, printf, stderr and a `tick` event each second. Its
-stdin task prints each received byte as `stdin:XX`; it is deliberately not a
-full REPL. Methods: `echo` returns JSON params; `status` reports uptime and queue
-drops; `log_burst` prints 500 lines; `delay` waits the specified 0..5000 ms.
+The example emits logs and `tick` events, echoes stdin bytes, and provides
+`echo`, `status`, `log_burst`, and `delay` methods. It is a test application,
+not a full REPL.
 
 ## Firmware integration
 
@@ -68,23 +66,22 @@ into a bounded output queue; callers keep ownership of their cJSON object.
 - Console VFS implements read/write/fstat/fcntl, not select/termios. Input is
   delivered as bytes; your application implements a REPL if needed. Output
   follows IDF's configured stdout newline conversion.
-- JSON strings/keys cannot contain NUL, numbers must have magnitude <= 2^53 - 1,
-  and params nesting is limited to 16 levels. Encode binary/large integers as strings.
-- Frames carry at most 1024 payload bytes. Console chunks are about 192 bytes.
-  Queues: 16 console frames, 8 control/event frames, 4 commands, 1024 input bytes.
-  Console writes do not block on USB; overload drops chunks. Inspect counters.
+- Output queues are bounded. Console writes do not wait for USB; overload can
+  drop chunks. Inspect the drop counters exposed by the component.
 - Control/event frames are selected before console frames. This bounds queued
   log work, but cannot preempt USB bytes or a running application callback.
   Do not use this protocol for safety-critical real-time control.
 - Reset/flash ends a session; reconnect explicitly. No application command is
   automatically replayed. A command may still execute after its host times out.
-- Version/API/wire format are experimental. Other IDF versions and transports
-  need validation before declaring support.
+- APIs and wire format are experimental. Other IDF versions and transports
+  require validation. See [Application protocol](../docs/APPLICATION.md) for
+  framing, JSON limits, and session behavior.
 
 ## Embedded host use
 
 `src/mux.rs` handles framing; `src/application.rs` provides synchronous sessions
-on a caller-owned `SerialIo`. The per-device worker uses those same modules.
+on a caller-owned `SerialIo`. The service worker uses the same protocol with
+duplex scheduling.
 For direct Rust embedding without an HTTP listener:
 
 ```sh
@@ -92,5 +89,5 @@ For direct Rust embedding without an HTTP listener:
 cargo run --example embedded_gateway -- SERIAL_PORT
 ```
 
-See `examples/embedded_gateway.rs` for the shared service API and event cursor.
+See [embedded_gateway.rs](../examples/embedded_gateway.rs) for the service API.
 An embedded app and a separate daemon must not both open the same port.

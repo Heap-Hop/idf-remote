@@ -2,8 +2,8 @@
 
 ## Software checks
 
-These checks use fake devices and synthetic artifacts. They do not open serial
-ports or modify hardware.
+CI runs these checks on macOS, Windows, and Linux. They use fake devices and
+synthetic artifacts, without opening physical serial ports:
 
 ```sh
 cargo fmt --check
@@ -12,105 +12,66 @@ cargo test --locked
 cargo build --locked --release
 ```
 
-CI runs the same checks on macOS, Windows, and Linux.
+`--locked` prevents dependency resolution from changing `Cargo.lock` during
+verification. It is optional for normal local builds.
 
-## ESP32-S3 fixture
-
-The optional fixture in `tests/firmware` prints `IDF_REMOTE_BOOT smoke-v1` at
-startup and emits `IDF_REMOTE_TICK n` once per second. Build it in an existing
-ESP-IDF environment:
-
-```sh
-cd tests/firmware
-idf.py set-target esp32s3
-idf.py build
-```
-
-Start the daemon from the repository root:
-
-```sh
-cargo build
-target/debug/idfr serve
-```
-
-Inspect the dynamically discovered device before any destructive test:
-
-```sh
-target/debug/idfr devices
-target/debug/idfr --port /dev/cu.usbmodemXXXX probe --json
-```
-
-Replace the example path with the dedicated test board. On Windows, use its
-`COM` address. The full hardware smoke test requires both the current address
-and expected USB serial so it can reject the wrong device before programming:
-
-```sh
-mkdir -p .artifacts
-python3 tests/hardware_smoke.py \
-  --port /dev/cu.usbmodemXXXX \
-  --usb-serial EXPECTED_SERIAL \
-  --build-dir tests/firmware/build \
-  --report .artifacts/hardware-smoke.json
-```
-
-This test flashes the fixture, verifies startup, exercises conflict and error
-contracts, checks that a mismatched target chip fails before writing, and resets
-the board. Reports and raw logs under `.artifacts` are ignored by Git.
-
-## Discovery and reconnect checks
-
-The following scripts are opt-in physical tests. They do not flash or erase:
-
-- `tests/reconnect_smoke.py` checks detach/reattach recovery for one device.
-- `tests/dynamic_discovery_smoke.py` checks hot-add while the daemon is running.
-- `tests/multi_device_smoke.py` checks isolation between two devices.
-
-Each script accepts `--help` and requires expected USB serials or markers. Use
-only boards that can be identified unambiguously.
-
-## Monitor latency
-
-`tests/monitor_latency.py` measures byte echo latency through the HTTP monitor
-path. It can use a pseudo-terminal for deterministic host-only measurements or
-the fixture in `tests/latency_firmware` for an opt-in USB measurement:
-
-```sh
-python3 tests/monitor_latency.py --help
-```
-
-## Destructive erase check
-
-Only use a disposable, positively identified board. Validate the recovery image
-before erasing:
-
-```sh
-target/debug/idfr plan --build-dir tests/firmware/build
-target/debug/idfr devices
-target/debug/idfr --port /dev/cu.usbmodemXXXX \
-  erase-flash --confirm erase-all-flash
-```
-
-Restore known firmware immediately after the test.
-
-## Application gateway MVP
-
-The optional fixture and supported IDF version are in [firmware/README.md](firmware/README.md).
-`cargo test` covers framing, partial reads/writes, timeout/late-response isolation,
-session invalidation and shared lib/HTTP worker ownership. To independently test
-the firmware C codec against reference CRC/framing vectors (requires a C compiler):
+For firmware codec changes, compare the C implementation against reference
+vectors (requires Python 3 and a C compiler):
 
 ```sh
 python3 tests/test_mux_codec.py
 ```
 
-`CC` can override the compiler and flags. After flashing the gateway fixture:
+## Hardware tests
+
+Use a dedicated test board. Identify its current port and expected USB serial
+before running a script. Some tests flash or reset the board; do not run another
+daemon or serial monitor against the same port. Keep reports in `.artifacts/`.
+
+Build the basic ESP32-S3 fixture in an activated ESP-IDF environment:
 
 ```sh
-python3 tests/gateway_smoke.py --url http://127.0.0.1:19876 \
+idf.py -C tests/firmware set-target esp32s3
+idf.py -C tests/firmware build
+```
+
+Start `idfr serve`, inspect `idfr devices --json`, then run:
+
+```sh
+mkdir -p .artifacts
+python3 tests/hardware_smoke.py \
+  --port SERIAL_PORT --usb-serial EXPECTED_SERIAL \
+  --build-dir tests/firmware/build \
+  --report .artifacts/hardware-smoke.json
+```
+
+This flashes the fixture and checks boot output, operation contracts, and target
+validation. The scripts below provide additional opt-in checks; run each with
+`--help` for required device identities, markers, and output paths.
+
+| Script | Purpose |
+| --- | --- |
+| `tests/reconnect_smoke.py` | Detach/reattach recovery |
+| `tests/dynamic_discovery_smoke.py` | Device discovery while the daemon runs |
+| `tests/multi_device_smoke.py` | Isolation between devices |
+| `tests/monitor_latency.py` | Echo latency, using `tests/latency_firmware` |
+| `tests/gateway_smoke.py` | Application calls, events, stdio, timeouts, and overload |
+
+For a full erase test, validate a recovery image first, select the board
+explicitly, and restore known firmware afterward. See `idfr erase-flash --help`.
+
+## Application gateway
+
+Build and flash the [gateway example](firmware/README.md), then start the daemon
+and run:
+
+```sh
+python3 tests/gateway_smoke.py --url http://127.0.0.1:9876 \
   --port SERIAL_PORT --usb-serial EXPECTED_SERIAL \
   --report .artifacts/gateway-smoke.json
 ```
 
-This script does not flash. It checks requests, events, all three stdio streams,
-console input, busy/error/timeout handling, log overload, and measures 100 HTTP
-request/response round trips. It requires the disposable gateway demo firmware.
+The script requires the gateway demo firmware and does not flash it. Use an
+explicit `--url` when a test script's default differs from your daemon address.
+Report hardware results separately from host-only tests, with the tested board,
+transport, and ESP-IDF version.

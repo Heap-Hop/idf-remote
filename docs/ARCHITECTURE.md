@@ -10,7 +10,7 @@ build tools / client
         |
         | HTTP
         v
-idf-remote daemon
+idfr serve
         |
         | desktop serial transport
         v
@@ -34,17 +34,18 @@ identity has one unambiguous match.
 Device discovery is dynamic. A daemon can start with no boards, create a worker
 when a supported device appears, mark it disconnected when removed, and resume
 monitoring after it returns. Passing one or more `--port` values to `serve`
-enables a restricted compatibility mode instead.
+restricts discovery to those addresses.
 
 The registry is currently in memory. Device IDs and operation records are not a
 persistent pairing or access-control mechanism across daemon restarts.
 
 ## Operations and concurrency
 
-Each managed device has one worker. That worker serializes probe, flash, erase,
-read, reset, monitor, and serial-write access for its port. Separate device
-workers can make progress concurrently. Busy or unsupported requests fail at
-admission rather than racing for the same hardware.
+Each device has one worker that owns its port; separate devices progress
+independently. Hardware operations such as flash and reset are exclusive. One
+application request and one console input can run concurrently while the worker
+continues receiving logs, events, and responses. Additional requests on a busy
+lane are rejected. See [Application protocol](APPLICATION.md) for details.
 
 HTTP handlers validate requests and enqueue bounded work. Blocking serial and
 flash operations run outside the asynchronous HTTP executor. Operations expose
@@ -92,10 +93,6 @@ Core request models refer to device IDs, capabilities, plans, and byte streams.
 Desktop serial details live behind `DeviceBackend`, `DeviceSession`, and
 `SerialIo` traits. This keeps HTTP, operation scheduling, validation, and log
 handling independent from `serialport` and `espflash` connection objects.
-
-A future Android USB Host backend can implement the same boundary with Android
-USB APIs while reusing the protocol and scheduling layers. Android support is a
-design direction, not a current feature.
 
 ## Network security
 

@@ -1,191 +1,129 @@
 # idf-remote
 
-Remote flash and serial monitor for ESP-IDF projects.
+Remote firmware flashing, serial monitoring, and application control for ESP
+boards. Build firmware where your tools run; connect the board to a host running
+`idfr serve`. Clients access the hardware over HTTP.
 
-`idf-remote` is a host daemon and CLI for using ESP development boards over
-HTTP. The daemon owns the physical serial ports; local or remote clients upload
-firmware, start hardware operations, and stream monitor output.
-
-This is an independent project and is not affiliated with or endorsed by
-Espressif Systems.
-
-The current desktop implementation supports:
-
-- dynamic discovery of multiple USB serial devices;
-- flash plans and ESP-IDF `flasher_args.json` imports;
-- probe, flash, erase, read, reset, serial write, and interactive monitor;
-- one serialized worker per device, so independent boards can run concurrently;
-- stable operation IDs, retry keys, progress events, and bounded log cursors;
-- passive monitor recovery after USB or serial interruptions.
-
-The protocol and CLI are still evolving. macOS with ESP32-S3 hardware is the
-primary tested path; CI builds and tests macOS, Windows, and Linux.
+This independent project is not affiliated with or endorsed by Espressif Systems.
 
 ## Build
 
-Install the current stable Rust toolchain, then run:
+With current stable Rust:
 
 ```sh
-cargo build --release --locked
+cargo build --release
 ```
 
-The CLI is named `idfr`; the project and Rust package remain `idf-remote`.
-The binary is written to `target/release/idfr`.
+The executable is `target/release/idfr` (`idfr.exe` on Windows). Add its directory
+to `PATH` to use the commands below.
+
+CI builds and tests macOS, Windows, and Linux. Hardware testing primarily covers
+macOS with ESP32-S3; the CLI and application protocol are still evolving.
 
 ## Quick start
 
-Start the daemon on the computer connected to the boards:
+On the computer connected to the board:
 
 ```sh
 idfr serve
 ```
 
-The default listener is `127.0.0.1:9876`. With no `--port` arguments, the daemon
-discovers supported USB serial devices and follows attach/detach events.
-
-List devices from another terminal:
+The daemon listens on `127.0.0.1:9876` and discovers USB serial devices dynamically.
+From another terminal, list devices and flash an ESP-IDF build:
 
 ```sh
 idfr devices
-idfr --json devices
-```
-
-When the daemon exposes one device, hardware commands select it automatically.
-With multiple devices, select one by the opaque ID shown by `devices`, or by its
-current host address:
-
-```sh
-idfr --device dev_0123456789abcdef01234567 monitor
-idfr --port /dev/cu.usbmodemXXXX monitor
-idfr --port COM5 monitor
-```
-
-`DeviceId` is the API identity. A serial path is only a current transport
-locator and may change after reconnecting.
-
-## Flash an ESP-IDF build
-
-Validate and normalize the build artifacts without contacting hardware:
-
-```sh
-idfr plan --build-dir build
-```
-
-Flash every non-empty image described by `build/flasher_args.json`, then enter
-the interactive monitor:
-
-```sh
 idfr flash --build-dir build --monitor
 ```
 
-Flash selected named images while preserving their manifest offsets:
+With one device, selection is automatic. With multiple devices, use the ID from
+`devices` or its current serial address:
 
 ```sh
+idfr --device DEVICE_ID monitor
+idfr --port SERIAL_PORT monitor
+```
+
+Replace `SERIAL_PORT` with a macOS, Linux, or Windows serial address. Use repeated
+`--port` options on `serve` to restrict which devices the daemon manages.
+
+## Flash and monitor
+
+Flash imports images and offsets from ESP-IDF's `flasher_args.json`. Select an
+image with `--image`, or provide a portable plan with `--plan`:
+
+```sh
+idfr plan --build-dir build
 idfr flash --build-dir build --image app
-idfr flash --build-dir build --image bootloader --image app
+idfr flash --plan plan.json --monitor
 ```
 
-Empty entries in the ESP-IDF manifest are skipped with a warning. `--image`
-remains available for selecting an explicit subset.
-
-Before writing, the client validates and snapshots every artifact. The daemon
-checks upload digests, enters the ROM loader, confirms the chip type, reads the
-security state and detected flash capacity, then validates all segment ranges.
-Secure boot and flash-encryption provisioning are currently rejected.
-
-For a toolchain-independent workflow, pass `--plan path/to/plan.json`. Artifact
-paths in the plan are resolved relative to that file:
-
-```json
-{
-  "version": 1,
-  "chip": "esp32s3",
-  "flash_settings": {
-    "mode": "dio",
-    "frequency": "80m",
-    "size": "4MB"
-  },
-  "segments": [
-    { "offset": "0x0", "file": "bootloader.bin" },
-    { "offset": "0x10000", "file": "app.bin" }
-  ]
-}
-```
-
-## Monitor and other operations
+Empty manifest images are skipped with a warning. Before writing, the daemon
+checks chip type, flash capacity, security state, and image ranges. Secure-boot
+and flash-encryption provisioning are not supported.
 
 ```sh
-# Interactive monitor; Ctrl-] exits and Ctrl-C is sent to the device.
 idfr monitor
-
-# Reset first, wait for a startup marker, and save exact serial bytes.
-idfr reset --monitor --wait 'READY' --timeout 30 \
-  --raw-log startup.serial
-
-# Probe the ROM loader and report chip/flash information.
+idfr reset --monitor
 idfr probe
-
-# Send text without resetting the board.
-idfr serial-write --text restart --newline
-
-# Read flash without overwriting an existing output file.
-idfr read-flash --offset 0 --size 4096 --output first-sector.bin
-
-# Full erase requires the exact confirmation value.
-idfr erase-flash --confirm erase-all-flash
 ```
 
-Monitor output uses ESP-IDF-style level colors when stdout is a terminal. Use
-`--color always` or `--color never` to override detection, and `--no-input` for
-a read-only monitor.
+Monitor forwards keyboard input and displays colored logs. `Ctrl-]` exits;
+`Ctrl-C` is sent to the device. Use `--no-input` for a read-only monitor. Monitoring
+reconnects after USB interruptions, though early boot output can be missed.
 
-## Remote clients and authentication
+Use `idfr --help` or `idfr COMMAND --help` for options, including serial writes,
+flash reads, erasing, log capture, and JSON output.
 
-Point a client at another daemon with `--url`:
+## Remote access
+
+For a remote USB host, forward its loopback listener over SSH:
+
+```sh
+ssh -N -L 9876:127.0.0.1:9876 user@usb-host
+```
+
+Clients then use the default URL, or an explicit `--url`:
 
 ```sh
 idfr --url http://127.0.0.1:9876 devices
 ```
 
-An SSH tunnel or private network can keep the daemon bound to loopback. If it
-must listen on a non-loopback address, a non-empty token file is mandatory:
+Non-loopback listeners require a token file on the host and clients:
 
 ```sh
-# Host
-idfr --token-file /path/to/token serve --bind 0.0.0.0:9876
-
-# Client
-idfr --url http://HOST:9876 --token-file /path/to/token devices
+idfr --token-file TOKEN_FILE serve --bind 0.0.0.0:9876
+idfr --url http://USB_HOST:9876 --token-file TOKEN_FILE devices
 ```
 
-The service currently uses plain HTTP. Protect remote traffic with SSH, a VPN,
-or another trusted encrypted transport.
+HTTP is unencrypted; use SSH or a trusted encrypted network for remote traffic.
 
-## Experimental application gateway
+## Application gateway (experimental)
 
-An optional [ESP-IDF component and example](firmware/README.md) multiplex console
-output, JSON commands and device events over ESP32-S3 USB Serial/JTAG. Ordinary
-firmware still uses the existing raw monitor path.
-
-After flashing the example and letting it boot:
+The optional [firmware component](firmware/README.md) carries console output,
+JSON commands, and events over one ESP32-S3 USB Serial/JTAG connection. After
+flashing the example firmware:
 
 ```sh
 idfr app-connect
-idfr app-call echo --params '{"hello":"device"}'
 idfr app-call status
 idfr monitor
 ```
 
-The same worker accepts application calls through Rust `Service::submit_application`
-and `POST /v1/application`. See [the MVP design](docs/GATEWAY-MVP.md) for the
-experimental protocol, API contract and current limits.
+Applications define their own commands. Rust applications can embed the service,
+and remote clients can use its HTTP API. See [Application protocol](docs/APPLICATION.md)
+for interfaces and session behavior. Ordinary flash and monitor use needs no
+special firmware component.
 
+## Development
 
-## Design and testing
+See [Architecture](docs/ARCHITECTURE.md), [Testing](TESTING.md), and
+[Agent guidance](AGENTS.md).
 
-See [Architecture](docs/ARCHITECTURE.md) for the component boundaries and
-[Testing](TESTING.md) for software and opt-in hardware checks.
+## AI assistance
+
+This project has primarily been developed with AI assistance, and its code is reviewed and tested by the maintainer.
 
 ## License
 
-Licensed under the [Apache License 2.0](LICENSE).
+[Apache-2.0](LICENSE).
