@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 use std::{fs, process::Command};
 
 fn command() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_idf-remote"))
+    Command::new(env!("CARGO_BIN_EXE_idfr"))
 }
 
 #[test]

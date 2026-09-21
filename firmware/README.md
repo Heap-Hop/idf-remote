@@ -13,21 +13,21 @@ Activate ESP-IDF 5.5.3, then from this repository:
 idf.py -C firmware/examples/gateway build
 ```
 
-Start `idf-remote serve` on the USB host and inspect `idf-remote devices`. Use
+Start `idfr serve` on the USB host and inspect `idfr devices`. Use
 only a disposable board; the next command overwrites its application:
 
 ```sh
-idf-remote --port SERIAL_PORT flash --build-dir firmware/examples/gateway/build
-idf-remote --port SERIAL_PORT app-connect
-idf-remote --port SERIAL_PORT app-call echo --params '{"hello":"device"}'
-idf-remote --port SERIAL_PORT app-call status
-idf-remote --port SERIAL_PORT monitor
+idfr --port SERIAL_PORT flash --build-dir firmware/examples/gateway/build
+idfr --port SERIAL_PORT app-connect
+idfr --port SERIAL_PORT app-call echo --params '{"hello":"device"}'
+idfr --port SERIAL_PORT app-call status
+idfr --port SERIAL_PORT monitor
 ```
 
 A board placed in download mode by its BOOT button may need a physical RESET
 (with BOOT released) after its first flash. Connect only after the application
 boots. Before connect, output is ordinary text. After connect, an ordinary
-serial monitor needs a device reset to get plain text again; `idf-remote monitor`
+serial monitor needs a device reset to get plain text again; `idfr monitor`
 uses decoded console bytes and frames its keyboard input automatically.
 
 The example emits ESP_LOGI, printf, stderr and a `tick` event each second. Its

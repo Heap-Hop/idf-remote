@@ -27,6 +27,7 @@ use std::{
 
 #[derive(Parser)]
 #[command(
+    name = "idfr",
     version,
     about = "Remote ESP-IDF flash and serial monitoring over HTTP"
 )]
@@ -49,7 +50,7 @@ struct Cli {
     /// Native serial path. Repeatable only when restricting `serve`.
     #[arg(long, global = true)]
     port: Vec<String>,
-    /// Opaque device ID returned by `idf-remote devices`.
+    /// Opaque device ID returned by `idfr devices`.
     #[arg(long, global = true, conflicts_with = "port")]
     device: Option<DeviceId>,
     #[command(subcommand)]
@@ -797,7 +798,7 @@ impl Http {
         Self::decode(
             self.request(reqwest::Method::GET, path)
                 .send()
-                .context("connect to idf-remote; start idf-remote serve first")?,
+                .context("connect to idf-remote; start idfr serve first")?,
         )
     }
     fn post<T: serde::de::DeserializeOwned>(
@@ -2045,45 +2046,38 @@ mod tests {
 
     #[test]
     fn cli_accepts_device_ids_and_multiple_serve_ports() {
-        let cli = Cli::try_parse_from(["idf-remote", "probe", "--device", "dev_test"]).unwrap();
+        let cli = Cli::try_parse_from(["idfr", "probe", "--device", "dev_test"]).unwrap();
         assert_eq!(cli.device, Some(DeviceId::new("dev_test").unwrap()));
         let Command::Probe(_) = cli.command else {
             panic!("expected probe command");
         };
 
         assert!(
-            Cli::try_parse_from([
-                "idf-remote",
-                "probe",
-                "--device",
-                "dev_test",
-                "--port",
-                "COM7",
-            ])
-            .is_err()
+            Cli::try_parse_from(["idfr", "probe", "--device", "dev_test", "--port", "COM7",])
+                .is_err()
         );
-        let cli = Cli::try_parse_from(["idf-remote", "serve", "--port", "COM7", "--port", "COM8"])
-            .unwrap();
+        let cli =
+            Cli::try_parse_from(["idfr", "serve", "--port", "COM7", "--port", "COM8"]).unwrap();
         let Command::Serve { .. } = cli.command else {
             panic!("expected serve command");
         };
         assert_eq!(cli.port, ["COM7", "COM8"]);
 
-        let cli = Cli::try_parse_from(["idf-remote", "serve"]).unwrap();
+        let cli = Cli::try_parse_from(["idfr", "serve"]).unwrap();
         let Command::Serve { .. } = cli.command else {
             panic!("expected serve command");
         };
         assert!(cli.port.is_empty());
 
-        assert!(Cli::try_parse_from(["idf-remote", "flash", "--build-dir", "build"]).is_ok());
+        assert!(Cli::try_parse_from(["idfr", "flash", "--build-dir", "build"]).is_ok());
 
-        let cli = Cli::try_parse_from(["idf-remote", "--port", "COM7", "monitor"]).unwrap();
+        let cli = Cli::try_parse_from(["idfr", "--port", "COM7", "monitor"]).unwrap();
         assert_eq!(cli.port, ["COM7"]);
-        let cli = Cli::try_parse_from(["idf-remote", "monitor", "--port", "COM7"]).unwrap();
+        let cli = Cli::try_parse_from(["idfr", "monitor", "--port", "COM7"]).unwrap();
         assert_eq!(cli.port, ["COM7"]);
 
         let cli = Cli::try_parse_from([
-            "idf-remote",
+            "idfr",
             "monitor",
             "--device",
             "dev_test",

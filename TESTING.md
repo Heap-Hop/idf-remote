@@ -30,14 +30,14 @@ Start the daemon from the repository root:
 
 ```sh
 cargo build
-target/debug/idf-remote serve
+target/debug/idfr serve
 ```
 
 Inspect the dynamically discovered device before any destructive test:
 
 ```sh
-target/debug/idf-remote devices
-target/debug/idf-remote --port /dev/cu.usbmodemXXXX probe --json
+target/debug/idfr devices
+target/debug/idfr --port /dev/cu.usbmodemXXXX probe --json
 ```
 
 Replace the example path with the dedicated test board. On Windows, use its
@@ -84,9 +84,9 @@ Only use a disposable, positively identified board. Validate the recovery image
 before erasing:
 
 ```sh
-target/debug/idf-remote plan --build-dir tests/firmware/build
-target/debug/idf-remote devices
-target/debug/idf-remote --port /dev/cu.usbmodemXXXX \
+target/debug/idfr plan --build-dir tests/firmware/build
+target/debug/idfr devices
+target/debug/idfr --port /dev/cu.usbmodemXXXX \
   erase-flash --confirm erase-all-flash
 ```
 

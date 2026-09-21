@@ -6,6 +6,10 @@ description = "Remote flash and serial monitoring for ESP-IDF development boards
 license = "Apache-2.0"
 publish = false
 
+[[bin]]
+name = "idfr"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1"
 async-stream = "0.3"

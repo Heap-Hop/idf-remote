@@ -29,14 +29,15 @@ Install the current stable Rust toolchain, then run:
 cargo build --release --locked
 ```
 
-The binary is written to `target/release/idf-remote`.
+The CLI is named `idfr`; the project and Rust package remain `idf-remote`.
+The binary is written to `target/release/idfr`.
 
 ## Quick start
 
 Start the daemon on the computer connected to the boards:
 
 ```sh
-idf-remote serve
+idfr serve
 ```
 
 The default listener is `127.0.0.1:9876`. With no `--port` arguments, the daemon
@@ -45,8 +46,8 @@ discovers supported USB serial devices and follows attach/detach events.
 List devices from another terminal:
 
 ```sh
-idf-remote devices
-idf-remote --json devices
+idfr devices
+idfr --json devices
 ```
 
 When the daemon exposes one device, hardware commands select it automatically.
@@ -54,9 +55,9 @@ With multiple devices, select one by the opaque ID shown by `devices`, or by its
 current host address:
 
 ```sh
-idf-remote --device dev_0123456789abcdef01234567 monitor
-idf-remote --port /dev/cu.usbmodemXXXX monitor
-idf-remote --port COM5 monitor
+idfr --device dev_0123456789abcdef01234567 monitor
+idfr --port /dev/cu.usbmodemXXXX monitor
+idfr --port COM5 monitor
 ```
 
 `DeviceId` is the API identity. A serial path is only a current transport
@@ -67,21 +68,21 @@ locator and may change after reconnecting.
 Validate and normalize the build artifacts without contacting hardware:
 
 ```sh
-idf-remote plan --build-dir build
+idfr plan --build-dir build
 ```
 
 Flash every non-empty image described by `build/flasher_args.json`, then enter
 the interactive monitor:
 
 ```sh
-idf-remote flash --build-dir build --monitor
+idfr flash --build-dir build --monitor
 ```
 
 Flash selected named images while preserving their manifest offsets:
 
 ```sh
-idf-remote flash --build-dir build --image app
-idf-remote flash --build-dir build --image bootloader --image app
+idfr flash --build-dir build --image app
+idfr flash --build-dir build --image bootloader --image app
 ```
 
 Empty entries in the ESP-IDF manifest are skipped with a warning. `--image`
@@ -115,23 +116,23 @@ paths in the plan are resolved relative to that file:
 
 ```sh
 # Interactive monitor; Ctrl-] exits and Ctrl-C is sent to the device.
-idf-remote monitor
+idfr monitor
 
 # Reset first, wait for a startup marker, and save exact serial bytes.
-idf-remote reset --monitor --wait 'READY' --timeout 30 \
+idfr reset --monitor --wait 'READY' --timeout 30 \
   --raw-log startup.serial
 
 # Probe the ROM loader and report chip/flash information.
-idf-remote probe
+idfr probe
 
 # Send text without resetting the board.
-idf-remote serial-write --text restart --newline
+idfr serial-write --text restart --newline
 
 # Read flash without overwriting an existing output file.
-idf-remote read-flash --offset 0 --size 4096 --output first-sector.bin
+idfr read-flash --offset 0 --size 4096 --output first-sector.bin
 
 # Full erase requires the exact confirmation value.
-idf-remote erase-flash --confirm erase-all-flash
+idfr erase-flash --confirm erase-all-flash
 ```
 
 Monitor output uses ESP-IDF-style level colors when stdout is a terminal. Use
@@ -143,7 +144,7 @@ a read-only monitor.
 Point a client at another daemon with `--url`:
 
 ```sh
-idf-remote --url http://127.0.0.1:9876 devices
+idfr --url http://127.0.0.1:9876 devices
 ```
 
 An SSH tunnel or private network can keep the daemon bound to loopback. If it
@@ -151,10 +152,10 @@ must listen on a non-loopback address, a non-empty token file is mandatory:
 
 ```sh
 # Host
-idf-remote --token-file /path/to/token serve --bind 0.0.0.0:9876
+idfr --token-file /path/to/token serve --bind 0.0.0.0:9876
 
 # Client
-idf-remote --url http://HOST:9876 --token-file /path/to/token devices
+idfr --url http://HOST:9876 --token-file /path/to/token devices
 ```
 
 The service currently uses plain HTTP. Protect remote traffic with SSH, a VPN,
@@ -169,10 +170,10 @@ firmware still uses the existing raw monitor path.
 After flashing the example and letting it boot:
 
 ```sh
-idf-remote app-connect
-idf-remote app-call echo --params '{"hello":"device"}'
-idf-remote app-call status
-idf-remote monitor
+idfr app-connect
+idfr app-call echo --params '{"hello":"device"}'
+idfr app-call status
+idfr monitor
 ```
 
 The same worker accepts application calls through Rust `Service::submit_application`

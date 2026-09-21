@@ -1,6 +1,6 @@
 """Opt-in desktop detach/reattach test. This script never programs flash.
 
-Start idf-remote for the intended device first. The script starts passive
+Start `idfr serve` for the intended device first. The script starts passive
 monitoring, asks for a physical detach and reattach, then verifies that the daemon
 reopens the same logical device and captures an application recovery marker without
 an explicit reset or monitor operation.

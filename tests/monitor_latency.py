@@ -196,7 +196,7 @@ def main():
     parser.add_argument("--url", default="http://127.0.0.1:19876")
     parser.add_argument("--port", required=True)
     parser.add_argument("--usb-serial", required=True)
-    parser.add_argument("--binary", type=Path, default=Path("target/release/idf-remote"))
+    parser.add_argument("--binary", type=Path, default=Path("target/release/idfr"))
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--samples", type=int, default=50)
     parser.add_argument("--burst-samples", type=int, default=100)
