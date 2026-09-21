@@ -20,12 +20,23 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tower::ServiceExt;
 
+// Timeouts are deadlock guards, not latency assertions. Protocol ordering is
+// controlled explicitly so runner load and timer granularity cannot decide it.
+const WATCHDOG: Duration = Duration::from_secs(10);
+const OP_TIMEOUT_MS: u64 = 30_000;
+
+#[derive(Default)]
+struct PeerControl {
+    release_response: AtomicBool,
+    pause_writes: AtomicBool,
+}
 struct Backend {
     opens: Arc<AtomicUsize>,
+    control: Arc<PeerControl>,
 }
 fn descriptor() -> DeviceDescriptor {
     DeviceDescriptor {
@@ -56,10 +67,10 @@ impl DeviceBackend for Backend {
     }
     fn open(&self, _: &DeviceId, _: bool) -> Result<Box<dyn DeviceSession>> {
         self.opens.fetch_add(1, Ordering::Relaxed);
-        Ok(Box::new(Hardware))
+        Ok(Box::new(Hardware(self.control.clone())))
     }
 }
-struct Hardware;
+struct Hardware(Arc<PeerControl>);
 impl DeviceSession for Hardware {
     fn probe(&mut self) -> Result<BoardInfo> {
         unreachable!()
@@ -79,19 +90,23 @@ impl DeviceSession for Hardware {
         unreachable!()
     }
     fn into_monitor(self: Box<Self>, _: u32, _: bool) -> Result<Box<dyn SerialIo>> {
-        Ok(Box::new(Peer::default()))
+        Ok(Box::new(Peer {
+            control: self.0.clone(),
+            ..Peer::default()
+        }))
     }
 }
 #[derive(Default)]
 struct Peer {
     decoder: mux::Decoder,
     bytes: VecDeque<u8>,
-    deferred: Option<(Instant, Vec<u8>)>,
+    deferred: Option<Vec<u8>>,
+    control: Arc<PeerControl>,
     write_blocked: bool,
 }
 impl Write for Peer {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.write_blocked {
+        if self.write_blocked || self.control.pause_writes.load(Ordering::SeqCst) {
             return Err(io::ErrorKind::WouldBlock.into());
         }
         self.write_blocked = true;
@@ -130,21 +145,21 @@ impl Write for Peer {
                             .unwrap(),
                         );
                         let command: Command = serde_json::from_slice(&frame.payload).unwrap();
-                        self.deferred = Some((
-                            Instant::now()
-                                + Duration::from_millis(if command.method == "fast" {
-                                    0
-                                } else {
-                                    500
-                                }),
-                            Frame {
-                                kind: mux::RESPONSE,
-                                payload: serde_json::to_vec(&command.params).unwrap(),
-                                ..frame
-                            }
-                            .encode()
-                            .unwrap(),
-                        ));
+                        let response = Frame {
+                            kind: mux::RESPONSE,
+                            payload: serde_json::to_vec(&command.params).unwrap(),
+                            ..frame
+                        }
+                        .encode()
+                        .unwrap();
+                        if command.method == "fast" {
+                            // Stop subsequent writes but keep RX live until the
+                            // test has observed this reply during console input.
+                            self.control.pause_writes.store(true, Ordering::SeqCst);
+                            self.bytes.extend(response);
+                        } else {
+                            self.deferred = Some(response);
+                        }
                     }
                     mux::CONSOLE => self.bytes.extend(frame.encode().unwrap()),
                     _ => {}
@@ -160,12 +175,10 @@ impl Write for Peer {
 impl Read for Peer {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.write_blocked = false;
-        if self
-            .deferred
-            .as_ref()
-            .is_some_and(|(t, _)| Instant::now() >= *t)
+        if self.control.release_response.load(Ordering::SeqCst)
+            && let Some(response) = self.deferred.take()
         {
-            self.bytes.extend(self.deferred.take().unwrap().1);
+            self.bytes.extend(response);
         }
         if self.bytes.is_empty() {
             std::thread::sleep(Duration::from_millis(1));
@@ -179,7 +192,7 @@ impl Read for Peer {
     }
 }
 async fn finish(service: &Service, op: Operation) -> Operation {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(WATCHDOG, async {
         loop {
             let current = service.get_operation(&op.id).unwrap();
             if current.status != "running" {
@@ -211,10 +224,12 @@ async fn post(app: axum::Router, path: &str, key: &str, body: Value) -> (StatusC
 #[tokio::test]
 async fn http_and_embedded_calls_share_one_owner_and_stream_while_busy() {
     let opens = Arc::new(AtomicUsize::new(0));
+    let control = Arc::new(PeerControl::default());
     let running = Arc::new(AtomicBool::new(true));
     let (service, worker) = Service::start(
         Arc::new(Backend {
             opens: opens.clone(),
+            control: control.clone(),
         }),
         descriptor(),
         None,
@@ -225,7 +240,7 @@ async fn http_and_embedded_calls_share_one_owner_and_stream_while_busy() {
     let request = ApplicationRequest {
         device_id: descriptor().id,
         monitor_baud: 115200,
-        timeout_ms: 2000,
+        timeout_ms: OP_TIMEOUT_MS,
         command: None,
     };
     let connected = finish(
@@ -264,7 +279,7 @@ async fn http_and_embedded_calls_share_one_owner_and_stream_while_busy() {
     let replay = service.submit_application(command, "call").await.unwrap();
     assert_eq!(replay.id, op.id);
     // The HTTP executor stays responsive while a worker waits for its response.
-    tokio::time::timeout(Duration::from_millis(200), async {
+    tokio::time::timeout(WATCHDOG, async {
         loop {
             let events = service
                 .application_events(&descriptor().id, &op.start_cursor)
@@ -300,7 +315,8 @@ async fn http_and_embedded_calls_share_one_owner_and_stream_while_busy() {
             .is_err()
     );
     // A mismatched baud must fail without disturbing the pending command.
-    let wrong_baud = SerialWriteRequest::from_bytes(descriptor().id, b"bad", 9600, 1000).unwrap();
+    let wrong_baud =
+        SerialWriteRequest::from_bytes(descriptor().id, b"bad", 9600, OP_TIMEOUT_MS).unwrap();
     let (status, value) = post(
         app.clone(),
         "/v1/serial-write",
@@ -315,9 +331,13 @@ async fn http_and_embedded_calls_share_one_owner_and_stream_while_busy() {
             .status,
         "failed"
     );
-    let input =
-        SerialWriteRequest::from_bytes(descriptor().id, b"interactive input\n", 115200, 1000)
-            .unwrap();
+    let input = SerialWriteRequest::from_bytes(
+        descriptor().id,
+        b"interactive input\n",
+        115200,
+        OP_TIMEOUT_MS,
+    )
+    .unwrap();
     let (status, value) = post(
         app.clone(),
         "/v1/serial-write",
@@ -332,7 +352,7 @@ async fn http_and_embedded_calls_share_one_owner_and_stream_while_busy() {
             .status,
         "succeeded"
     );
-    tokio::time::timeout(Duration::from_millis(200), async {
+    tokio::time::timeout(WATCHDOG, async {
         loop {
             let events = service
                 .application_events(&descriptor().id, &op.start_cursor)
@@ -350,10 +370,14 @@ async fn http_and_embedded_calls_share_one_owner_and_stream_while_busy() {
     .await
     .unwrap();
     assert_eq!(service.get_operation(&op.id).unwrap().status, "running");
+    control.release_response.store(true, Ordering::SeqCst);
     assert_eq!(finish(&service, op).await.result, Some(json!({"value":42})));
-    // Reverse admission: start a request during a backpressured long write.
+    // Reverse admission: hold writes until both operations are admitted. Two
+    // console frames suffice; bulk throughput is not part of this contract.
+    control.pause_writes.store(true, Ordering::SeqCst);
     let input =
-        SerialWriteRequest::from_bytes(descriptor().id, &vec![b'x'; 8192], 115200, 3000).unwrap();
+        SerialWriteRequest::from_bytes(descriptor().id, &vec![b'x'; 512], 115200, OP_TIMEOUT_MS)
+            .unwrap();
     let (status, value) = post(
         app.clone(),
         "/v1/serial-write",
@@ -382,12 +406,15 @@ async fn http_and_embedded_calls_share_one_owner_and_stream_while_busy() {
         .submit_application(quick, "during-input")
         .await
         .unwrap();
+    control.pause_writes.store(false, Ordering::SeqCst);
     assert_eq!(finish(&service, quick).await.result, Some(json!("quick")));
     assert_eq!(
         service.get_operation(&long_input.id).unwrap().status,
         "running"
     );
-    assert_eq!(finish(&service, long_input).await.status, "succeeded");
+    control.pause_writes.store(false, Ordering::SeqCst);
+    let finished = finish(&service, long_input).await;
+    assert_eq!(finished.status, "succeeded", "{finished:?}");
     // Re-attaching a monitor must not replace the negotiated session or port.
     let (_, value) = post(
         app.clone(),
