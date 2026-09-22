@@ -60,7 +60,13 @@ writers and independently redirected FILE streams are unsupported.
 
 ## Host interface
 
-`POST /v1/application` accepts an `Idempotency-Key` and this JSON:
+`POST /v1/application` **requires** the `Idempotency-Key` HTTP header for both
+connect and command requests. Missing it returns HTTP 400 with
+`{"error":"missing Idempotency-Key header"}`. The CLI supplies it automatically;
+HTTP clients must generate a unique key per logical operation and reuse that key
+with the same body when retrying that operation.
+
+Request body:
 
 ```json
 {
@@ -71,12 +77,24 @@ writers and independently redirected FILE streams are unsupported.
 }
 ```
 
+For example, connect using curl (replace the device ID and use a fresh key for
+each new connection attempt):
+
+```sh
+curl --fail-with-body http://127.0.0.1:38473/v1/application \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: connect-example-1' \
+  -d '{"device_id":"DEVICE_ID","timeout_ms":2000}'
+```
+
 Omit `command` (or set it to null) to connect explicitly. The response is HTTP
 202 with an ordinary Operation. Poll `/v1/operations/{id}` until completion;
 `result` is handshake identity or the command's JSON response. Application
 errors/timeouts produce failed operations; malformed requests fail admission.
 Same-key retries reuse the retained operation rather than sending another
-command. Retention is bounded. Busy devices return 409.
+command. A new key is required for a new negotiation after disconnection; replaying
+a completed connect operation does not reconnect. Reusing a key with different
+request content returns 409. Retention is bounded. Busy devices return 409.
 
 `/v1/events` and `/v1/stream` expose `application_connected`,
 `application_disconnected`, `application_event`, `application_protocol_error`,
@@ -85,6 +103,17 @@ operation, not consumed from a shared subscription. Monitor stdin uses console
 frames in an application session. Reset/flash invalidates the session before
 opening the bootloader. USB reopen restores monitor transport, not an application
 session: call connect again. Other clients must observe these lifecycle events.
+
+The application session belongs to the daemon's device worker, not an individual
+HTTP client. All subscribers for that device receive its lifecycle events,
+including the client that initiated an operation. Explicit connect may replace
+an existing session, but does **not** emit `application_disconnected` merely for
+renegotiation. Its operation reports progress/failure; successful negotiation
+broadcasts `application_connected`. Actual transport/session loss and hardware
+operations that invalidate the session can still emit `application_disconnected`.
+Track the connect operation to completion instead of waiting for a disconnect
+notification to start another connect. Clients should coalesce reconnect attempts
+and use bounded backoff after failures.
 
 `Service::submit_application` is the embedded counterpart; `get_operation` and
 `application_events` expose results and cursors without an HTTP listener.

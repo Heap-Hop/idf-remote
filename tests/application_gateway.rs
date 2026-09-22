@@ -243,6 +243,22 @@ async fn http_and_embedded_calls_share_one_owner_and_stream_while_busy() {
         timeout_ms: OP_TIMEOUT_MS,
         command: None,
     };
+    // Raw HTTP clients must supply the key too; rejection must not touch USB.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/application")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024).await.unwrap()).unwrap();
+    assert_eq!(error["error"], "missing Idempotency-Key header");
+    assert_eq!(opens.load(Ordering::Relaxed), 0);
     let connected = finish(
         &service,
         service
@@ -252,6 +268,51 @@ async fn http_and_embedded_calls_share_one_owner_and_stream_while_busy() {
     )
     .await;
     assert_eq!(connected.status, "succeeded");
+    // Distinct clients may explicitly negotiate again. Broadcasting a false
+    // disconnect here causes reconnect-on-disconnect clients to trigger themselves.
+    for key in ["client-a-connect", "client-b-connect"] {
+        let (status, value) = post(
+            app.clone(),
+            "/v1/application",
+            key,
+            serde_json::to_value(&request).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let connected = finish(&service, serde_json::from_value(value).unwrap()).await;
+        assert_eq!(connected.status, "succeeded");
+        let events = service
+            .application_events(&descriptor().id, &connected.start_cursor)
+            .unwrap();
+        assert_eq!(
+            events
+                .events
+                .iter()
+                .filter(|e| e.kind == "application_connected")
+                .count(),
+            1
+        );
+        assert!(
+            !events
+                .events
+                .iter()
+                .any(|e| e.kind == "application_disconnected")
+        );
+        let (status, replay) = post(
+            app.clone(),
+            "/v1/application",
+            key,
+            serde_json::to_value(&request).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(replay["id"], connected.id);
+        let replayed_events = service
+            .application_events(&descriptor().id, &connected.start_cursor)
+            .unwrap();
+        assert_eq!(replayed_events.events.len(), events.events.len());
+    }
+    assert_eq!(opens.load(Ordering::Relaxed), 1);
     let command = ApplicationRequest {
         command: Some(Command {
             method: "echo".into(),
@@ -431,11 +492,22 @@ async fn http_and_embedded_calls_share_one_owner_and_stream_while_busy() {
     );
     assert_eq!(opens.load(Ordering::Relaxed), 1);
     let (_, value) = post(app, "/v1/reset", "reset", json!({"device_id":"fixture"})).await;
+    let reset: Operation = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(
         finish(&service, serde_json::from_value(value).unwrap())
             .await
             .status,
         "succeeded"
+    );
+    let events = service
+        .application_events(&descriptor().id, &reset.start_cursor)
+        .unwrap();
+    assert!(
+        events
+            .events
+            .iter()
+            .any(|e| e.kind == "application_disconnected"
+                && e.data["reason"] == "hardware operation")
     );
     let command = ApplicationRequest {
         command: Some(Command {

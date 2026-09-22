@@ -1153,13 +1153,9 @@ impl Service {
                                     command,
                                     timeout_ms,
                                 } => {
-                                    if connecting && duplex.session.is_some() {
-                                        self.emit(
-                                            &device_id,
-                                            "application_disconnected",
-                                            json!({"reason":"renegotiating"}),
-                                        );
-                                    }
+                                    // Explicit negotiation is not a disconnect. A
+                                    // broadcast here would make reconnecting clients
+                                    // trigger another negotiation themselves.
                                     duplex.start_application(
                                         job.id.clone(),
                                         command.as_ref(),
