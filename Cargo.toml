@@ -2,9 +2,14 @@
 name = "idf-remote"
 version = "0.1.0"
 edition = "2024"
-description = "Remote flash and serial monitoring for ESP-IDF development boards"
+description = "Remote firmware flashing, serial monitoring, and application control for ESP boards"
 license = "Apache-2.0"
-publish = false
+repository = "https://github.com/Heap-Hop/idf-remote"
+readme = "README.md"
+
+keywords = ["esp32", "esp-idf", "embedded", "serial", "flashing"]
+categories = ["command-line-utilities", "embedded", "development-tools"]
+
 
 [[bin]]
 name = "idfr"
@@ -16,17 +21,34 @@ async-stream = "0.3"
 axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
-crossterm = { version = "0.29.0", default-features = false, features = ["windows"] }
+crossterm = { version = "0.29.0", default-features = false, features = [
+    "windows",
+] }
 ctrlc = "3.4"
-espflash = { version = "=4.5.0", default-features = false, features = ["serialport"] }
+espflash = { version = "=4.5.0", default-features = false, features = [
+    "serialport",
+] }
 regex = "1.11"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "json",
+    "multipart",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serialport = { version = "4.7", default-features = false }
 sha2 = "0.11"
 tempfile = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "signal", "fs", "io-util", "macros"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "time",
+    "sync",
+    "signal",
+    "fs",
+    "io-util",
+    "macros",
+] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
