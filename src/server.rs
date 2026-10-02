@@ -3719,6 +3719,63 @@ mod tests {
         worker.join();
     }
     #[test]
+    fn bearer_auth_protects_queries_streams_and_hardware_admission() {
+        let (_tx, rx) = mpsc::channel();
+        let backend = Arc::new(backend(rx));
+        let running = Arc::new(AtomicBool::new(true));
+        let device = test_descriptor(DeviceAvailability::Available, all_capabilities());
+        let (service, worker) = Service::start(
+            backend.clone(),
+            device,
+            Some("test-token".into()),
+            running.clone(),
+        )
+        .unwrap();
+        let app = router(service);
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for (method, path) in [
+                ("GET", "/v1/devices"),
+                ("GET", "/v1/stream"),
+                ("GET", "/v1/operations/example/artifact"),
+                ("POST", "/v1/flash"),
+                ("POST", "/v1/erase-flash"),
+                ("POST", "/v1/application"),
+                ("POST", "/v1/serial-write"),
+            ] {
+                for auth in [None, Some("Bearer wrong-token")] {
+                    let mut request = Request::builder().method(method).uri(path);
+                    if let Some(auth) = auth {
+                        request = request.header("authorization", auth);
+                    }
+                    let response = app
+                        .clone()
+                        .oneshot(request.body(Body::empty()).unwrap())
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::UNAUTHORIZED,
+                        "{method} {path}"
+                    );
+                }
+            }
+            let response = app
+                .oneshot(
+                    Request::get("/v1/devices")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        });
+        assert_eq!(backend.open_calls.load(Ordering::Relaxed), 0);
+        running.store(false, Ordering::Relaxed);
+        worker.join();
+    }
+
+    #[test]
     fn http_contract_exposes_descriptors_and_accepts_only_device_ids() {
         let (_tx, rx) = mpsc::channel();
         let running = Arc::new(AtomicBool::new(true));

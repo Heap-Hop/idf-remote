@@ -1,5 +1,7 @@
 //! JNI example adapter. All protocol and HTTP work lives in idf_remote.
+mod http_config;
 use anyhow::{Context, Result, ensure};
+use http_config::HttpConfig;
 use idf_remote::{
     application::Command,
     backend::android::AndroidUsbBackend,
@@ -10,7 +12,7 @@ use idf_remote::{
 use jni::{
     JNIEnv,
     objects::{JByteArray, JClass, JString},
-    sys::{jint, jlong, jstring},
+    sys::{jboolean, jint, jlong, jstring},
 };
 use std::{
     collections::HashMap,
@@ -79,7 +81,7 @@ fn finish(g: &Gateway, operation: Operation) -> Result<Operation> {
         std::thread::sleep(Duration::from_millis(2));
     }
 }
-fn open(fd: i32, cache: &str) -> Result<i64> {
+fn open(fd: i32, cache: &str, http: HttpConfig) -> Result<i64> {
     ensure!(fd >= 0, "invalid USB fd");
     let backend = Arc::new(AndroidUsbBackend::with_cache_dir(cache));
     // Duplicate only while Java keeps UsbDeviceConnection alive.
@@ -90,12 +92,12 @@ fn open(fd: i32, cache: &str) -> Result<i64> {
         .enable_all()
         .build()?;
     // Bind first: a port collision must not leak a running device worker.
-    let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:38473"))?;
+    let listener = runtime.block_on(tokio::net::TcpListener::bind(http.bind))?;
     let running = Arc::new(AtomicBool::new(true));
     let (service, worker) = Service::start_many_in(
         backend.clone(),
         vec![device.clone()],
-        None,
+        http.token,
         running.clone(),
         Some(Path::new(cache)),
     )?;
@@ -148,10 +150,15 @@ pub extern "system" fn Java_dev_idfremote_android_Native_open(
     _: JClass,
     fd: jint,
     cache: JString,
+    lan: jboolean,
+    port: jint,
+    token: JString,
 ) -> jlong {
     let result = (|| {
         let cache: String = env.get_string(&cache)?.into();
-        open(fd, &cache)
+        let token: String = env.get_string(&token)?.into();
+        let http = HttpConfig::new(lan != 0, port, &token).map_err(anyhow::Error::msg)?;
+        open(fd, &cache, http)
     })();
     match result {
         Ok(id) => id,

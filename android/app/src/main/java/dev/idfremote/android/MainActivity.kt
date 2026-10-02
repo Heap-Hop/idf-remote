@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 object Native {
     init { System.loadLibrary("idf_remote_android") }
-    @JvmStatic external fun open(fd: Int, cache: String): Long
+    @JvmStatic external fun open(fd: Int, cache: String, lan: Boolean, port: Int, token: String): Long
     @JvmStatic external fun poll(id: Long): String
     @JvmStatic external fun write(id: Long, bytes: ByteArray): String
     @JvmStatic external fun application(id: Long, method: String, params: String): String
@@ -22,6 +22,9 @@ object Native {
 
 /** Foreground example. Android owns permission/lifecycle; idf_remote owns all USB IO. */
 class MainActivity : Activity() {
+    private lateinit var settings: GatewaySettings
+    @Volatile private var activeHttp: HttpConfig? = null
+    @Volatile private var connecting = false
     private val usb by lazy { getSystemService(USB_SERVICE) as UsbManager }
     private val worker = Executors.newSingleThreadExecutor()
     private val ui = Handler(Looper.getMainLooper())
@@ -79,7 +82,7 @@ class MainActivity : Activity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        settings = GatewaySettings(this)
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.setOnApplyWindowInsetsListener { view, insets ->
             @Suppress("DEPRECATION")
@@ -101,6 +104,7 @@ class MainActivity : Activity() {
         }
         row("Refresh" to { refresh() }, "Disconnect" to { worker.execute { disconnect(); state("Disconnected") } },
             "Clear" to { synchronized(pending) { pending.setLength(0) }; log.text="" })
+        row("HTTP / Display" to { settings.show(activeHttp, connecting) })
         val scroll = ScrollView(this)
         log = TextView(this).apply { typeface=Typeface.MONOSPACE; textSize=12f; setTextIsSelectable(true) }
         scroll.addView(log); root.addView(scroll,LinearLayout.LayoutParams(-1,0,1f))
@@ -112,7 +116,7 @@ class MainActivity : Activity() {
         val method=EditText(this).apply { hint="Application method"; setSingleLine(true) }; root.addView(method)
         val params=EditText(this).apply { hint="JSON params (default null)"; setSingleLine(true) }; root.addView(params)
         row("Call" to { application(method.text.toString(),params.text.toString().ifBlank { "null" }) }, needsConnection=true)
-        root.addView(TextView(this).apply { text="HTTP 127.0.0.1:38473 while connected • flash / monitor / application"; textSize=11f })
+        root.addView(TextView(this).apply { text="HTTP / Display: copy connection details • keep app open"; textSize=11f })
         setContentView(root)
         val filter=IntentFilter(permissionAction).apply { addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED); addAction(UsbManager.ACTION_USB_DEVICE_DETACHED) }
         if (Build.VERSION.SDK_INT>=33) registerReceiver(receiver,filter,Context.RECEIVER_NOT_EXPORTED) else registerReceiver(receiver,filter)
@@ -135,13 +139,18 @@ class MainActivity : Activity() {
         }
         if (devices.childCount==0) devices.addView(TextView(this).apply { text="No USB device connected" })
     }
-    private fun connect(device: UsbDevice) { worker.execute {
-        if (destroyed) return@execute
+    private fun connect(device: UsbDevice) {
+        if (connecting) return
+        val http = settings.http()
+        connecting = true
+        worker.execute {
+        if (destroyed) { connecting = false; return@execute }
         disconnect(); state("Connecting…")
         try {
             val conn=usb.openDevice(device) ?: error("Android could not open device")
             connection=conn
-            handle=Native.open(conn.fileDescriptor,cacheDir.absolutePath)
+            handle=Native.open(conn.fileDescriptor,cacheDir.absolutePath,http.lan,http.port,http.token)
+            activeHttp=http
             currentDevice=device.deviceName
             val id=handle; val active=AtomicBoolean(true); running=active
             reader=Thread({
@@ -161,8 +170,9 @@ class MainActivity : Activity() {
                     if (active.get() && !destroyed) state("Event stream failed: ${e.message}")
                 }
             },"idfr-events").also {it.start()}
-            connected(true); state("Connected • shared Rust worker + HTTP ready")
+            connected(true); state("Connected • HTTP ${if(http.lan) "LAN + token" else "loopback"}:${http.port}")
         } catch (e: Exception) { disconnect(); state("Connect failed: ${e.message}") }
+        finally { connecting = false }
     } }
     private fun send(text: String) { worker.execute {
         try { check(handle!=0L){"Not connected"}; val result=JSONObject(Native.write(handle,text.toByteArray(Charsets.UTF_8)))
@@ -177,7 +187,7 @@ class MainActivity : Activity() {
     private fun disconnect() {
         connected(false); running.set(false); reader?.join(); reader=null
         if (handle!=0L) Native.close(handle)
-        handle=0; connection?.close(); connection=null; currentDevice=null
+        handle=0; activeHttp=null; connection?.close(); connection=null; currentDevice=null
     }
     override fun onDestroy() {
         destroyed=true; unregisterReceiver(receiver); ui.removeCallbacksAndMessages(null)

@@ -9,7 +9,9 @@ on desktop. Kotlin never performs USB transfers.
 
 - ARM64 Android 8+ with USB Host; Espressif native USB Serial/JTAG `303a:1001`.
 - Console monitoring/input, application connect/calls/events, and backend reset.
-- Local library API and optional HTTP access share one USB owner and admission rules.
+- Local library API and HTTP access share one USB owner and admission rules.
+- Loopback by default; optional IPv4 LAN listener with a generated Bearer token.
+  HTTP / Display offers configurable port, copy URL/token, and a screen-on switch.
 - Probe, flash, read-flash and erase-flash use a pinned espflash transport fork,
   with the same image/capacity/security validation as desktop. Desktop defaults
   continue to use crates.io espflash.
@@ -49,19 +51,43 @@ input bytes; App connect negotiates multiplexing, Status/Echo invoke application
 methods. Console input remains available after negotiation. Reconnecting the
 USB handle does not reset firmware: use App connect again to recover its session.
 
-The sample binds only `127.0.0.1:38473` on the phone, without a token. To test
-remote access through the already authenticated wireless ADB connection:
+## LAN access and display
+
+Open **HTTP / Display** before connecting USB. Enable **LAN access**, choose the
+port (default `38473`), and tap **Save**. Then connect the board. While connected,
+network settings are locked; disconnect first to change them. URLs are refreshed
+from Wi-Fi/Ethernet addresses when opening settings or tapping Refresh addresses.
+
+Use **Copy URL** and **Copy token** to transfer the connection details to the PC.
+The generated token is stored privately on the phone and survives app restarts.
+**New token** replaces it while disconnected. Save the copied token in a local
+file and use the standard CLI:
+
+```sh
+umask 077
+printf '%s' 'PASTE_TOKEN' > idfr-token
+idfr --url http://PHONE_IP:38473 --token-file idfr-token devices
+idfr --url http://PHONE_IP:38473 --token-file idfr-token flash --build-dir ./build --monitor
+idfr --url http://PHONE_IP:38473 --token-file idfr-token app-connect
+idfr --url http://PHONE_IP:38473 --token-file idfr-token app-call status
+```
+
+LAN mode listens on `0.0.0.0` and requires the token for every HTTP endpoint,
+including loopback access. HTTP is unencrypted; use a trusted network. Token
+clipboard content is marked sensitive to suppress system previews.
+
+**Keep screen on while app is visible** takes effect immediately and is saved
+independently of network settings. It defaults to on. Keep the app visible during
+use; this does not provide a background/foreground service or guarantee operation
+after locking the phone. Foreground service support is a later milestone.
+
+With LAN access off, the listener binds `127.0.0.1` without a token. Wireless ADB
+forwarding remains available:
 
 ```sh
 adb -s PHONE_SERIAL forward tcp:38474 tcp:38473
-idfr --url http://127.0.0.1:38474 devices --json
-idfr --url http://127.0.0.1:38474 app-connect
-idfr --url http://127.0.0.1:38474 app-call status
-idfr --url http://127.0.0.1:38474 monitor --no-input --timeout 10
+idfr --url http://127.0.0.1:38474 devices
 ```
-
-This uses ADB forwarding, not a LAN-exposed HTTP listener. A production host can
-choose its own listener and authentication policy using the library.
 
 ## Library boundary
 
@@ -90,7 +116,7 @@ See [PLAN.md](PLAN.md) for validation and remaining work before PR review.
 
 ## Flashing through the phone
 
-After selecting the authorized board in the app, use the same desktop CLI:
+With loopback mode and ADB forwarding enabled, use the same desktop CLI:
 
 ```sh
 idfr --url http://127.0.0.1:38474 probe

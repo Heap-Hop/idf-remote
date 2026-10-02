@@ -27,6 +27,16 @@ Heap-Hop on `feat/android-transport`; idf-remote remains local until acceptance.
 - [x] Read back 64 KiB and compare byte-for-byte with the application image.
 - [ ] Hardware erase validation and additional Android/board coverage.
 
+## LAN and display milestone
+
+- [x] Loopback default and opt-in IPv4 LAN listener with required Bearer token.
+- [x] Configurable port, persistent random token, and URL/token clipboard buttons.
+- [x] Wi-Fi/Ethernet address display and explicit refresh; exclude cellular addresses.
+- [x] Persistent screen-on switch using the Activity window flag.
+- [x] Native listener-policy tests and shared router authentication regression.
+- [x] Phone verification: URL/token copy-paste, flag on/off, settings preserved across APK update.
+- [x] PC direct Wi-Fi verification: unauthorized rejection, authenticated devices, application echo and logs.
+
 ## Later
 
 - Foreground Android service/background lifecycle.
