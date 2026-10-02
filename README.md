@@ -132,5 +132,5 @@ This project has primarily been developed with AI assistance, and its code is re
 ## Android (experimental)
 
 An [Android USB host sample](android/README.md) embeds the Rust library for
-console monitoring and application calls, with optional loopback HTTP access.
-Android flashing is not yet implemented.
+flashing, console monitoring and application calls, with optional loopback HTTP
+access. It currently supports Espressif native USB Serial/JTAG.

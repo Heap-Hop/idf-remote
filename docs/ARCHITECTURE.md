@@ -119,6 +119,9 @@ workers before closing Android's UsbDeviceConnection. HTTP and local library
 calls share the Service; neither gets a second USB owner. Embedded Android hosts
 supply an app-private cache directory using `Service::start_many_in`.
 
-Android currently advertises monitor, serial input and reset only. Flash/probe
-operations require a future espflash transport adaptation and are rejected by
-capability checks. See [Android](../android/README.md).
+Android uses a pinned espflash fork with an injectable transport. Desktop and
+Android compile the same session/validation implementation against their
+respective espflash dependencies. The Android adapter supplies bulk IO and CDC
+DTR/RTS controls; desktop retains crates.io espflash and native TTY/COM ports.
+Temporary readback files use an app-private cache directory. See
+[Android](../android/README.md).

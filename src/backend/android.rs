@@ -2,14 +2,19 @@
 //!
 //! The caller owns permission and hotplug handling. Each attachment gets a fresh
 //! identity; an old fd/session is never silently rebound to another USB device.
-use super::{BoardInfo, DeviceBackend, DeviceSession, Progress, SerialIo};
+use super::android_flashing::{Session, validate};
+use super::{DeviceBackend, DeviceSession};
 use crate::{device::*, plan::PreparedPlan};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
+use espflash_android::connection::{
+    Connection, ResetAfterOperation, ResetBeforeOperation, Transport,
+};
 use nusb::{
     Device, Interface, MaybeFuture,
     io::{EndpointRead, EndpointWrite},
     transfer::{Bulk, ControlOut, ControlType, In, Out, Recipient},
 };
+use serialport::{ClearBuffer, UsbPortInfo};
 use std::{
     collections::{BTreeMap, HashMap},
     io::{self, Read, Write},
@@ -21,12 +26,17 @@ use std::{
     time::Duration,
 };
 
+// Keep IN requests queued while espflash writes or waits between replies.
+// A demand-only reader loses burst ROM SYNC replies on native USB Serial/JTAG.
+const RX_TRANSFERS: usize = 8;
+
 static NEXT_ATTACHMENT: AtomicU64 = AtomicU64::new(1);
 
 /// Registry of Android-authorized connections. Does not enumerate USB or request permission.
 #[derive(Default)]
 pub struct AndroidUsbBackend {
     records: Mutex<HashMap<DeviceId, Arc<Record>>>,
+    cache_dir: Option<std::path::PathBuf>,
 }
 struct Record {
     device: Device,
@@ -90,6 +100,14 @@ fn parse_layout(config: nusb::descriptors::ConfigurationDescriptor<'_>) -> Resul
     })
 }
 impl AndroidUsbBackend {
+    /// Use an app-private directory for temporary flash readback files.
+    pub fn with_cache_dir(path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            cache_dir: Some(path.into()),
+            ..Self::default()
+        }
+    }
+
     /// Takes an owned duplicate, not the fd owned by UsbDeviceConnection.
     /// Keep the Android connection alive until workers stop and this backend is dropped.
     /// Blocking: call off the Android UI thread.
@@ -122,6 +140,10 @@ impl AndroidUsbBackend {
             },
             status: DeviceStatus::AVAILABLE_IDLE,
             capabilities: vec![
+                DeviceCapability::Probe,
+                DeviceCapability::Flash,
+                DeviceCapability::ReadFlash,
+                DeviceCapability::EraseFlash,
                 DeviceCapability::Monitor,
                 DeviceCapability::SerialWrite,
                 DeviceCapability::Reset,
@@ -167,10 +189,10 @@ impl DeviceBackend for AndroidUsbBackend {
     fn refresh(&self, id: &DeviceId) -> Result<DeviceDescriptor> {
         Ok(self.record(id)?.descriptor.clone())
     }
-    fn validate(&self, _: &PreparedPlan) -> Result<()> {
-        bail!("Android USB flashing is not implemented")
+    fn validate(&self, plan: &PreparedPlan) -> Result<()> {
+        validate(plan).map(|_| ())
     }
-    fn open(&self, id: &DeviceId, _: bool) -> Result<Box<dyn DeviceSession>> {
+    fn open(&self, id: &DeviceId, no_reset_before: bool) -> Result<Box<dyn DeviceSession>> {
         let record = self.record(id)?;
         ensure!(
             !record.leased.swap(true, Ordering::AcqRel),
@@ -192,20 +214,41 @@ impl DeviceBackend for AndroidUsbBackend {
         let reader = data
             .endpoint::<Bulk, In>(record.layout.input)?
             .reader(64)
-            .with_read_timeout(Duration::from_millis(5));
+            .with_num_transfers(RX_TRANSFERS)
+            .with_read_timeout(Duration::from_secs(3));
         let writer = data
             .endpoint::<Bulk, Out>(record.layout.output)?
             .writer(256)
             .with_num_transfers(2)
-            .with_write_timeout(Duration::from_millis(5));
-        Ok(Box::new(UsbSession {
-            io: UsbIo {
-                reader,
-                writer,
-                control,
-                lease,
+            .with_write_timeout(Duration::from_secs(3));
+        let io = UsbIo {
+            reader,
+            writer,
+            control,
+            timeout: Duration::from_secs(3),
+            baud: 115200,
+            line_bits: 0,
+            pending: std::collections::VecDeque::new(),
+            lease,
+        };
+        let connection = Connection::new(
+            Box::new(io),
+            UsbPortInfo {
+                vid: 0x303a,
+                pid: 0x1001,
+                serial_number: None,
+                manufacturer: None,
+                product: None,
             },
-        }))
+            ResetAfterOperation::NoResetNoStub,
+            if no_reset_before {
+                ResetBeforeOperation::NoReset
+            } else {
+                ResetBeforeOperation::DefaultReset
+            },
+            115200,
+        );
+        Ok(Box::new(Session::new(connection, self.cache_dir.clone())))
     }
 }
 // Declared last in UsbIo: endpoints are released before allowing another open.
@@ -219,6 +262,10 @@ struct UsbIo {
     reader: EndpointRead<Bulk>,
     writer: EndpointWrite<Bulk>,
     control: Interface,
+    timeout: Duration,
+    baud: u32,
+    line_bits: u16,
+    pending: std::collections::VecDeque<u8>,
     lease: Lease,
 }
 impl UsbIo {
@@ -228,7 +275,7 @@ impl UsbIo {
         }
         Ok(())
     }
-    fn lines(&self, bits: u16) -> Result<()> {
+    fn lines(&mut self, bits: u16) -> Result<()> {
         self.connected()?;
         self.control
             .control_out(
@@ -243,19 +290,23 @@ impl UsbIo {
                 Duration::from_secs(1),
             )
             .wait()?;
+        self.line_bits = bits;
         Ok(())
-    }
-    fn reset(&self) -> Result<()> {
-        self.lines(0)?;
-        std::thread::sleep(Duration::from_millis(100));
-        self.lines(2)?;
-        std::thread::sleep(Duration::from_millis(100));
-        self.lines(0)
     }
 }
 impl Read for UsbIo {
     fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+        if b.is_empty() {
+            return Ok(0);
+        }
         self.connected()?;
+        if !self.pending.is_empty() {
+            let n = b.len().min(self.pending.len());
+            for byte in &mut b[..n] {
+                *byte = self.pending.pop_front().unwrap();
+            }
+            return Ok(n);
+        }
         self.reader.read(b)
     }
 }
@@ -273,33 +324,95 @@ impl Write for UsbIo {
         self.writer.flush()
     }
 }
-struct UsbSession {
-    io: UsbIo,
+impl std::fmt::Debug for UsbIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AndroidUsbTransport")
+            .finish_non_exhaustive()
+    }
 }
-impl DeviceSession for UsbSession {
-    fn probe(&mut self) -> Result<BoardInfo> {
-        bail!("Android bootloader probing is not implemented")
+fn port_error(error: anyhow::Error) -> serialport::Error {
+    serialport::Error::new(serialport::ErrorKind::Unknown, format!("{error:#}"))
+}
+impl Transport for UsbIo {
+    fn name(&self) -> Option<String> {
+        Some(self.lease.0.descriptor.id.to_string())
     }
-    fn flash(
-        &mut self,
-        _: &PreparedPlan,
-        _: u32,
-        _: &mut dyn FnMut(Progress),
-    ) -> Result<BoardInfo> {
-        bail!("Android flashing is not implemented")
+    fn baud_rate(&self) -> serialport::Result<u32> {
+        Ok(self.baud)
     }
-    fn read_flash(&mut self, _: u32, _: u32, _: u32, _: &mut dyn Write) -> Result<BoardInfo> {
-        bail!("Android flash reading is not implemented")
+    fn set_baud_rate(&mut self, baud: u32) -> serialport::Result<()> {
+        // Native USB Serial/JTAG has a fixed USB link rate; no UART clock to configure.
+        self.connected()?;
+        self.baud = baud;
+        Ok(())
     }
-    fn erase_flash(&mut self, _: u32) -> Result<BoardInfo> {
-        bail!("Android flash erasing is not implemented")
+    fn timeout(&self) -> Duration {
+        self.timeout
     }
-    fn into_monitor(self: Box<Self>, baud: u32, reset: bool) -> Result<Box<dyn SerialIo>> {
-        ensure!(baud > 0, "baud must be positive");
-        if reset {
-            self.io.reset()?;
+    fn set_timeout(&mut self, timeout: Duration) -> serialport::Result<()> {
+        self.reader.set_read_timeout(timeout);
+        self.writer.set_write_timeout(timeout);
+        self.timeout = timeout;
+        Ok(())
+    }
+    fn bytes_to_read(&mut self) -> serialport::Result<u32> {
+        self.reader.set_read_timeout(Duration::ZERO);
+        let mut bytes = [0; 64];
+        let result = self.reader.read(&mut bytes);
+        self.reader.set_read_timeout(self.timeout);
+        match result {
+            Ok(n) => self.pending.extend(&bytes[..n]),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) => {}
+            Err(e) => return Err(e.into()),
         }
-        Ok(Box::new(self.io))
+        Ok(self.pending.len() as u32)
+    }
+    fn clear(&mut self, buffer: ClearBuffer) -> serialport::Result<()> {
+        self.connected()?;
+        if matches!(buffer, ClearBuffer::Output | ClearBuffer::All) {
+            // espflash only purges input. Do not report a drain as an output purge.
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "USB output purge is unsupported",
+            )
+            .into());
+        }
+        if matches!(buffer, ClearBuffer::Input | ClearBuffer::All) {
+            self.pending.clear();
+            // Stop submissions so an active firmware log stream cannot make clear unbounded.
+            self.reader.cancel_all();
+            self.reader.set_read_timeout(Duration::from_secs(1));
+            let mut discarded = [0; 256];
+            let result = (|| -> io::Result<()> {
+                loop {
+                    match self.reader.read(&mut discarded) {
+                        Ok(0) => return Ok(()),
+                        Ok(_) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+            })();
+            self.reader.set_read_timeout(self.timeout);
+            self.reader.set_num_transfers(RX_TRANSFERS);
+            result?;
+        }
+        Ok(())
+    }
+    fn write_data_terminal_ready(&mut self, level: bool) -> serialport::Result<()> {
+        self.lines((self.line_bits & !1) | u16::from(level))
+            .map_err(port_error)
+    }
+    fn write_request_to_send(&mut self, level: bool) -> serialport::Result<()> {
+        self.lines((self.line_bits & !2) | (u16::from(level) << 1))
+            .map_err(port_error)
+    }
+    fn set_dtr_rts(&mut self, dtr: bool, rts: bool) -> serialport::Result<()> {
+        self.lines(u16::from(dtr) | (u16::from(rts) << 1))
+            .map_err(port_error)
     }
 }
 #[cfg(test)]

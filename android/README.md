@@ -10,8 +10,9 @@ on desktop. Kotlin never performs USB transfers.
 - ARM64 Android 8+ with USB Host; Espressif native USB Serial/JTAG `303a:1001`.
 - Console monitoring/input, application connect/calls/events, and backend reset.
 - Local library API and optional HTTP access share one USB owner and admission rules.
-- **No Android probe/flash/read-flash/erase-flash yet.** They are absent from device
-  capabilities and rejected. Desktop flashing remains unchanged.
+- Probe, flash, read-flash and erase-flash use a pinned espflash transport fork,
+  with the same image/capacity/security validation as desktop. Desktop defaults
+  continue to use crates.io espflash.
 - Foreground sample, one selected USB device. Replug requires Connect and Android
   permission if prompted. Application negotiation is explicit; commands are never
   replayed automatically. No background service or persistent device pairing yet.
@@ -67,7 +68,8 @@ choose its own listener and authentication policy using the library.
 Enable `idf-remote` with `default-features = false, features = ["android-usb"]`.
 The default `desktop` feature preserves the existing CLI and serial backend.
 
-1. Open with `UsbManager`, duplicate its fd into `OwnedFd`, then call
+1. Construct `AndroidUsbBackend::with_cache_dir` with an app-private cache path.
+   Open with `UsbManager`, duplicate its fd into `OwnedFd`, then call
    `AndroidUsbBackend::attach` off the UI thread.
 2. Start `Service::start_many_in` with descriptors and an app-private cache path.
 3. Use `submit_monitor`, `submit_serial_write`, `submit_application`, operation
@@ -79,8 +81,28 @@ The default `desktop` feature preserves the existing CLI and serial backend.
 IDs are attachment-scoped, not persistent physical identities. The backend uses
 nusb's Android linux_usbfs detach-and-claim path to handle a kernel CDC driver;
 other user-space owners remain protected. IO has short bounded timeouts, and
-writes submit buffered bytes without blocking for a drain. Success indicates
-bytes accepted by the driver, not a firmware acknowledgement.
+console writes submit buffered bytes without blocking for a drain. Bootloader
+commands explicitly drain output and use protocol-specific timeouts. Console
+success indicates bytes accepted by the driver, not a firmware acknowledgement.
 
 The JNI sample keeps protocol decisions in Rust; its Kotlin UI is replaceable.
 See [PLAN.md](PLAN.md) for validation and remaining work before PR review.
+
+## Flashing through the phone
+
+After selecting the authorized board in the app, use the same desktop CLI:
+
+```sh
+idfr --url http://127.0.0.1:38474 probe
+idfr --url http://127.0.0.1:38474 flash --build-dir ./build --monitor
+```
+
+The build directory is on the client computer; complete images are uploaded to
+the phone and flashed locally over USB. Probe/flash interrupt application
+communication. After firmware restarts, negotiate a new application session.
+
+The Android dependency uses [Heap-Hop/espflash](https://github.com/Heap-Hop/espflash/tree/feat/android-transport)
+at the commit pinned in Cargo.toml, based on upstream v4.5.0. Its optional
+`custom-transport` feature replaces OS port handles with an owned byte-stream
+and modem-control interface. USB permission and drivers remain in the embedding
+app/backend. No global crates.io patch is applied.

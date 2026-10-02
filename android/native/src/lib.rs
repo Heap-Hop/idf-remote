@@ -81,7 +81,7 @@ fn finish(g: &Gateway, operation: Operation) -> Result<Operation> {
 }
 fn open(fd: i32, cache: &str) -> Result<i64> {
     ensure!(fd >= 0, "invalid USB fd");
-    let backend = Arc::new(AndroidUsbBackend::default());
+    let backend = Arc::new(AndroidUsbBackend::with_cache_dir(cache));
     // Duplicate only while Java keeps UsbDeviceConnection alive.
     let owned = unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()?;
     let device = backend.attach(owned)?;

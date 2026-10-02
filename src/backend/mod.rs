@@ -1,3 +1,19 @@
+// Compile one session implementation against each backend-specific espflash source.
+// Keeping the aliases local also permits both features on Linux without unifying sources.
+#[cfg(feature = "desktop")]
+mod flashing {
+    use ::espflash;
+    use serialport::SerialPort;
+    include!("flashing.rs");
+}
+#[cfg(all(
+    feature = "android-usb",
+    any(target_os = "android", target_os = "linux")
+))]
+mod android_flashing {
+    use espflash_android as espflash;
+    include!("flashing.rs");
+}
 #[cfg(feature = "desktop")]
 mod espflash;
 
@@ -79,7 +95,7 @@ pub trait SerialIo: Read + Write {}
 impl<T: Read + Write> SerialIo for T {}
 
 // A narrow seam for proving handoff ordering without connected hardware.
-#[cfg(any(feature = "desktop", test))]
+#[cfg(any(feature = "desktop", feature = "android-usb", test))]
 trait MonitorControl {
     fn set_baud(&mut self, baud: u32) -> Result<()>;
     fn clear_protocol_input(&mut self) -> Result<()>;
@@ -87,7 +103,7 @@ trait MonitorControl {
     fn reset(&mut self) -> Result<()>;
 }
 
-#[cfg(any(feature = "desktop", test))]
+#[cfg(any(feature = "desktop", feature = "android-usb", test))]
 fn prepare_monitor(
     port: &mut impl MonitorControl,
     baud: u32,

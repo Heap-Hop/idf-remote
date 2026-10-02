@@ -112,7 +112,7 @@ class MainActivity : Activity() {
         val method=EditText(this).apply { hint="Application method"; setSingleLine(true) }; root.addView(method)
         val params=EditText(this).apply { hint="JSON params (default null)"; setSingleLine(true) }; root.addView(params)
         row("Call" to { application(method.text.toString(),params.text.toString().ifBlank { "null" }) }, needsConnection=true)
-        root.addView(TextView(this).apply { text="HTTP 127.0.0.1:38473 while connected • monitor / application only"; textSize=11f })
+        root.addView(TextView(this).apply { text="HTTP 127.0.0.1:38473 while connected • flash / monitor / application"; textSize=11f })
         setContentView(root)
         val filter=IntentFilter(permissionAction).apply { addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED); addAction(UsbManager.ACTION_USB_DEVICE_DETACHED) }
         if (Build.VERSION.SDK_INT>=33) registerReceiver(receiver,filter,Context.RECEIVER_NOT_EXPORTED) else registerReceiver(receiver,filter)

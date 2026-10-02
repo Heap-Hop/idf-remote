@@ -610,6 +610,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "espflash"
+version = "4.5.0"
+source = "git+https://github.com/Heap-Hop/espflash?rev=532cd5918081f471e5f18ae8f40cf8eb079f1fce#532cd5918081f471e5f18ae8f40cf8eb079f1fce"
+dependencies = [
+ "base64",
+ "bitflags 2.13.1",
+ "bytemuck",
+ "esp-idf-part",
+ "flate2",
+ "gimli",
+ "libc",
+ "log",
+ "md-5 0.11.0",
+ "miette",
+ "nix 0.31.3",
+ "object",
+ "reed-solomon",
+ "regex",
+ "serde",
+ "serialport",
+ "sha2",
+ "slip-codec",
+ "strum 0.28.0",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -944,7 +972,8 @@ dependencies = [
  "clap",
  "crossterm",
  "ctrlc",
- "espflash",
+ "espflash 4.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "espflash 4.5.0 (git+https://github.com/Heap-Hop/espflash?rev=532cd5918081f471e5f18ae8f40cf8eb079f1fce)",
  "nusb",
  "regex",
  "reqwest",

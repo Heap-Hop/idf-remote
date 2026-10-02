@@ -1,7 +1,8 @@
 # Android implementation plan
 
 Branch: `feat/android-usb-host`. Keep changes local until user hardware acceptance;
-then prepare a PR. Do not publish an espflash fork as part of this first slice.
+then prepare a PR. The separately authorized espflash fork is published under
+Heap-Hop on `feat/android-transport`; idf-remote remains local until acceptance.
 
 ## Library and sample
 
@@ -17,12 +18,14 @@ then prepare a PR. Do not publish an espflash fork as part of this first slice.
 - [ ] Physical detach/replug and permission-denial testing of the integrated sample.
 - [ ] User acceptance before PR creation.
 
-## Flash milestone (still pending)
+## Flash milestone
 
-- [ ] Design the espflash transport seam and review upstream/fork strategy.
-- [ ] Bootloader entry + SYNC without flash writes.
-- [ ] Adapt serial IO and atomic control lines while retaining desktop behavior.
-- [ ] Validate probe, flash size/security checks, write/verify, and application recovery.
+- [x] Publish the opt-in transport seam on Heap-Hop/espflash, based on v4.5.0.
+- [x] Bootloader entry + SYNC and chip/capacity/MAC probe on the phone.
+- [x] Native USB IO and atomic CDC modem controls; desktop retains crates.io espflash.
+- [x] Share desktop image/capacity/security validation; write/verify and recover application calls.
+- [x] Read back 64 KiB and compare byte-for-byte with the application image.
+- [ ] Hardware erase validation and additional Android/board coverage.
 
 ## Later
 
@@ -39,5 +42,10 @@ then prepare a PR. Do not publish an espflash fork as part of this first slice.
 - During a 3000 ms application callback, console input echoed in approximately 166 ms over wireless ADB; callback subsequently returned 3000. This is an end-to-end observation, not a USB-only benchmark.
 - A deliberately shorter client timeout failed without replay, as expected.
 - No firmware reboot during reconnects (boot identity remained unchanged).
-- Unsupported probe returned HTTP 400 before bootloader access.
-- Physical USB unplug/replug, permission denial, background lifecycle and Android flashing remain unverified/unimplemented as listed above.
+- Native USB probe reports the expected ESP32-S3 and 4 MiB flash.
+- Bootloader, partition table and application upload/write/verify passed over wireless ADB HTTP forwarding; logs resumed after reset.
+- A 64 KiB application readback matched the uploaded image exactly.
+- Post-flash/readback application hello, status and JSON echo passed.
+- Fixed a real USB receive starvation issue: keeping multiple IN transfers queued during command writes/waits allows all burst ROM SYNC responses to arrive.
+- Fork revision is pinned in both lockfiles; desktop dependency tree retains registry espflash.
+- Physical USB unplug/replug, permission denial, background lifecycle and full-chip erase remain unverified as listed above.

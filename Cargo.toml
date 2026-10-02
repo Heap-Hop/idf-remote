@@ -19,7 +19,7 @@ required-features = ["desktop"]
 [features]
 default = ["desktop"]
 desktop = ["dep:espflash", "dep:serialport", "dep:clap", "dep:crossterm", "dep:ctrlc", "dep:reqwest"]
-android-usb = ["dep:nusb"]
+android-usb = ["dep:nusb", "dep:espflash-android", "dep:serialport"]
 
 [[example]]
 name = "embedded_gateway"
@@ -65,6 +65,9 @@ tokio = { version = "1", features = [
 ] }
 
 nusb = { version = "0.2.7", optional = true }
+
+[target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
+espflash-android = { package = "espflash", git = "https://github.com/Heap-Hop/espflash", rev = "532cd5918081f471e5f18ae8f40cf8eb079f1fce", optional = true, default-features = false, features = ["custom-transport"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
