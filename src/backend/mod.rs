@@ -1,9 +1,17 @@
+#[cfg(feature = "desktop")]
 mod espflash;
+
+#[cfg(all(
+    feature = "android-usb",
+    any(target_os = "android", target_os = "linux")
+))]
+pub mod android;
 
 use anyhow::Result;
 use serde::Serialize;
 use std::io::{Read, Write};
 
+#[cfg(feature = "desktop")]
 pub use self::espflash::EspflashBackend;
 use crate::{
     device::{DeviceDescriptor, DeviceId},
@@ -38,7 +46,7 @@ pub enum Progress {
     },
 }
 
-/// Synchronous hardware boundary. The later daemon will run this on device
+/// Synchronous hardware boundary. The daemon runs this on device
 /// workers, not on the HTTP executor. espflash types stay inside its adapter.
 pub trait DeviceBackend: Send + Sync + 'static {
     fn devices(&self) -> Result<Vec<DeviceDescriptor>>;
@@ -71,6 +79,7 @@ pub trait SerialIo: Read + Write {}
 impl<T: Read + Write> SerialIo for T {}
 
 // A narrow seam for proving handoff ordering without connected hardware.
+#[cfg(any(feature = "desktop", test))]
 trait MonitorControl {
     fn set_baud(&mut self, baud: u32) -> Result<()>;
     fn clear_protocol_input(&mut self) -> Result<()>;
@@ -78,6 +87,7 @@ trait MonitorControl {
     fn reset(&mut self) -> Result<()>;
 }
 
+#[cfg(any(feature = "desktop", test))]
 fn prepare_monitor(
     port: &mut impl MonitorControl,
     baud: u32,

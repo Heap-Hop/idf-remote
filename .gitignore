@@ -10,3 +10,9 @@ __pycache__/
 /firmware/examples/*/build
 /firmware/examples/*/sdkconfig
 /firmware/examples/*/sdkconfig.old
+/android/.gradle/
+/android/.kotlin/
+/android/**/build/
+/android/native/target/
+/android/app/src/main/jniLibs/
+/android/local.properties

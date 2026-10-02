@@ -18,3 +18,14 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo build --locked --release
+  android-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+          components: clippy
+      - run: cargo test --locked --no-default-features --features android-usb
+      - run: cargo clippy --locked --no-default-features --features android-usb --target aarch64-linux-android --lib -- -D warnings
+      - run: cargo check --locked --manifest-path android/native/Cargo.toml --target aarch64-linux-android
