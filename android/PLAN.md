@@ -15,7 +15,8 @@ Heap-Hop on `feat/android-transport`; idf-remote remains local until acceptance.
 - [x] Integrated phone validation: monitor, console echo, application connect/status/echo.
 - [x] Shared ownership through UI/library and forwarded HTTP: UI Status reused the HTTP-negotiated session.
 - [x] Three explicit close/open cycles with fresh attachment IDs and successful application renegotiation.
-- [ ] Physical detach/replug and permission-denial testing of the integrated sample.
+- [x] Physical detach/replug and default-app automatic reconnect of the integrated sample.
+- [ ] Permission-denial testing of the integrated sample.
 - [ ] User acceptance before PR creation.
 
 ## Flash milestone
@@ -40,12 +41,12 @@ Heap-Hop on `feat/android-transport`; idf-remote remains local until acceptance.
 ## Later
 
 - Foreground Android service/background lifecycle.
-- Automatic reconnect and stable identity policy.
+- Stable identity policy and recovery beyond system-authorized USB attach.
 - Additional USB-UART drivers and ABI/device coverage.
 
 ## Validation evidence
 
-- ARM64 Android library + APK build; Android lint: 0 errors, 11 sample/tooling warnings.
+- ARM64 Android library + APK build; Android lint: 0 errors, 19 sample/tooling warnings.
 - Desktop regression suite and no-default-feature library tests passed; host and Android clippy passed.
 - Wireless ADB forwards the phone's loopback service to a separate desktop port.
 - HTTP status/echo and plain + multiplexed console input passed on gateway-demo.
@@ -58,4 +59,44 @@ Heap-Hop on `feat/android-transport`; idf-remote remains local until acceptance.
 - Post-flash/readback application hello, status and JSON echo passed.
 - Fixed a real USB receive starvation issue: keeping multiple IN transfers queued during command writes/waits allows all burst ROM SYNC responses to arrive.
 - Fork revision is pinned in both lockfiles; desktop dependency tree retains registry espflash.
-- Physical USB unplug/replug, permission denial, background lifecycle and full-chip erase remain unverified as listed above.
+- Permission denial, background lifecycle and full-chip erase remain unverified as listed above.
+
+## USB defaults and console follow
+
+- [x] Declare the native USB Serial/JTAG attach filter and system default-app handler.
+- [x] Handle cold-start and existing-Activity attach intents; check current enumeration and system permission before automatic connection.
+- [x] Avoid reopening an active handle on duplicate attach events or switching devices implicitly.
+- [x] Follow new console output; pause for manual scrollback and provide Latest logs to resume.
+- [x] Test phone saved a default-app association including the board USB serial; system launch connected automatically.
+- [x] User-confirmed second physical replug restored logs; host verified automatic reconnect and authenticated LAN discovery.
+- [x] Phone UI verification: new logs follow the tail, manual scrollback stays fixed during output, and Latest logs resumes following. APK build and lint passed.
+
+## Proposed next milestone: separate HTTP and USB lifetimes
+
+Assessment: medium scope, localized lifecycle work rather than a transport or
+protocol rewrite. Recommended before adding an Android foreground service.
+
+Current coupling: JNI open(fd) creates the backend, Service, listener and one
+selected device. USB detach calls close(handle), destroying all of them.
+
+Proposed sequence:
+
+1. Split JNI into start/stop gateway and attach/detach USB; the app starts the
+   authenticated listener independently of having a connected board.
+2. Add app-private storage support to Service's existing dynamic discovery
+   constructor. It already supports an empty inventory and later devices.
+3. Make Android detach surface an explicit disconnected state and fail pending
+   work without replay. Join/release the affected USB worker before closing the
+   Java connection, while keeping HTTP and unrelated devices alive.
+4. Bound retired attachment records/workers. The current backend allocates fresh
+   IDs per attachment, while discovery retains old records and has a 64-device
+   limit; repeated reconnects must not exhaust that limit. Keep stable physical
+   pairing a separate policy, never silently redirect an old ID to new hardware.
+5. Replace per-device JNI event polling with gateway/device selection and
+   separate HTTP running, USB connected and application-session UI states.
+
+Acceptance: start with zero USB devices; devices endpoint stays reachable during
+unplug; authorized reattach works without restarting HTTP; in-flight operations
+fail clearly and are not replayed; repeated attach/detach cycles do not leak
+workers/fds or exhaust inventory. Existing flash/monitor/app-call APIs remain
+compatible. Background service work remains a later milestone.

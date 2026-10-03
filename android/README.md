@@ -15,10 +15,11 @@ on desktop. Kotlin never performs USB transfers.
 - Probe, flash, read-flash and erase-flash use a pinned espflash transport fork,
   with the same image/capacity/security validation as desktop. Desktop defaults
   continue to use crates.io espflash.
-- Foreground sample, one selected USB device. Replug requires Connect and Android
-  permission if prompted. Application negotiation is explicit; commands are never
+- Foreground sample, one selected USB device. System-authorized attach events
+  reconnect automatically. Application negotiation is explicit; commands are never
   replayed automatically. No background service or persistent device pairing yet.
-- Log view shows complete decoded lines; it is not an ANSI terminal emulator.
+- Logs follow the latest output by default. Scroll up to read history; scroll
+  back to the bottom or tap **Latest logs** to resume. It is not an ANSI terminal emulator.
 
 ## Build
 
@@ -50,6 +51,19 @@ and observe logs. With the [gateway firmware](../firmware/README.md), Send echoe
 input bytes; App connect negotiates multiplexing, Status/Echo invoke application
 methods. Console input remains available after negotiation. Reconnecting the
 USB handle does not reset firmware: use App connect again to recover its session.
+
+For repeated USB use, choose IDF Remote in Android's USB chooser and select
+**Always use** when offered. The app declares a filter for native USB Serial/JTAG
+(`303a:1001`), and checks the system-granted permission again on every attachment.
+Android controls the saved default; the app cannot preserve permission itself
+across unplug. Default-app prompts vary by phone. If no default is saved, use
+Connect and approve the system request. See [Android USB Host](https://developer.android.com/develop/connectivity/usb/host).
+
+USB attach can launch the app or deliver an intent to its existing Activity.
+Repeated attach notifications do not reopen an active connection. An attachment
+to a different device does not replace the currently selected device automatically.
+HTTP still stops on USB detach in this milestone and restarts on connection;
+independent HTTP lifetime is planned next.
 
 ## LAN access and display
 

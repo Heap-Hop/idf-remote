@@ -5,7 +5,6 @@ import android.app.PendingIntent
 import android.content.*
 import android.hardware.usb.*
 import android.os.*
-import android.graphics.Typeface
 import android.widget.*
 import org.json.JSONObject
 import java.util.concurrent.Executors
@@ -30,13 +29,13 @@ class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
     private val pending = StringBuilder()
     private val connectedButtons = mutableListOf<Button>()
-    private lateinit var log: TextView
+    private lateinit var log: ConsoleLogView
     private lateinit var status: TextView
     private lateinit var devices: LinearLayout
     @Volatile private var destroyed = false
     private var connection: UsbDeviceConnection? = null // worker-owned
     private var handle = 0L
-    private var currentDevice: String? = null
+    @Volatile private var currentDevice: String? = null
     private var reader: Thread? = null
     private var running = AtomicBoolean(false)
     private var permissionPending: String? = null // UI-owned
@@ -56,7 +55,7 @@ class MainActivity : Activity() {
     private val render = object : Runnable {
         override fun run() {
             val text = synchronized(pending) { pending.toString().also { pending.setLength(0) } }
-            if (text.isNotEmpty()) log.text = (log.text.toString()+text).takeLast(32768)
+            if (text.isNotEmpty()) log.append(text)
             if (!destroyed) ui.postDelayed(this,100)
         }
     }
@@ -73,10 +72,10 @@ class MainActivity : Activity() {
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     if (device?.deviceName == permissionPending) permissionPending = null
-                    worker.execute { if (currentDevice == device?.deviceName) { disconnect(); state("USB detached; reconnect explicitly") } }
+                    worker.execute { if (currentDevice == device?.deviceName) { disconnect(); state("USB detached • waiting for authorized reconnect") } }
                     refresh()
                 }
-                UsbManager.ACTION_USB_DEVICE_ATTACHED -> refresh()
+                UsbManager.ACTION_USB_DEVICE_ATTACHED -> { refresh(); handleUsbAttach(intent) }
             }
         }
     }
@@ -103,11 +102,10 @@ class MainActivity : Activity() {
             root.addView(row)
         }
         row("Refresh" to { refresh() }, "Disconnect" to { worker.execute { disconnect(); state("Disconnected") } },
-            "Clear" to { synchronized(pending) { pending.setLength(0) }; log.text="" })
-        row("HTTP / Display" to { settings.show(activeHttp, connecting) })
-        val scroll = ScrollView(this)
-        log = TextView(this).apply { typeface=Typeface.MONOSPACE; textSize=12f; setTextIsSelectable(true) }
-        scroll.addView(log); root.addView(scroll,LinearLayout.LayoutParams(-1,0,1f))
+            "Clear" to { synchronized(pending) { pending.setLength(0) }; log.clear() })
+        row("HTTP / Display" to { settings.show(activeHttp, connecting) }, "Latest logs" to { log.followLatest() })
+        log = ConsoleLogView(this)
+        root.addView(log,LinearLayout.LayoutParams(-1,0,1f))
         val input=EditText(this).apply { hint="Console input"; setSingleLine(true) }; root.addView(input)
         row("Send ↵" to { send(input.text.toString()+"\r") }, "Raw" to { send(input.text.toString()) },
             "Tab" to { send("\t") }, "Ctrl-C" to { send("\u0003") }, needsConnection=true)
@@ -120,14 +118,33 @@ class MainActivity : Activity() {
         setContentView(root)
         val filter=IntentFilter(permissionAction).apply { addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED); addAction(UsbManager.ACTION_USB_DEVICE_DETACHED) }
         if (Build.VERSION.SDK_INT>=33) registerReceiver(receiver,filter,Context.RECEIVER_NOT_EXPORTED) else registerReceiver(receiver,filter)
-        ui.post(render); refresh()
+        ui.post(render); refresh(); handleUsbAttach(intent)
     }
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        refresh()
+        handleUsbAttach(intent)
+    }
+    @Suppress("DEPRECATION")
+    private fun handleUsbAttach(intent: Intent) {
+        if (intent.action != UsbManager.ACTION_USB_DEVICE_ATTACHED) return
+        val announced = intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE) ?: return
+        // Intents are notifications, never permission or identity evidence.
+        val live = usb.deviceList[announced.deviceName] ?: return
+        if (live.deviceId != announced.deviceId || !supported(live)) return
+        if (usb.hasPermission(live)) connect(live, automatic = true)
+        // The system may deliver its broadcast before granting the default app.
+        // The subsequent Activity intent handles that case without another prompt.
+    }
+    private fun supported(device: UsbDevice) = device.vendorId == 0x303a && device.productId == 0x1001
+
     private fun refresh() {
         devices.removeAllViews()
         usb.deviceList.values.sortedBy {it.deviceName}.forEach {device ->
             devices.addView(Button(this).apply {
                 text="%04x:%04x %s — Connect".format(device.vendorId,device.productId,device.deviceName)
-                isEnabled=device.vendorId==0x303a && device.productId==0x1001
+                isEnabled=supported(device)
                 setOnClickListener {
                     if (usb.hasPermission(device)) connect(device) else {
                         permissionPending=device.deviceName
@@ -139,12 +156,21 @@ class MainActivity : Activity() {
         }
         if (devices.childCount==0) devices.addView(TextView(this).apply { text="No USB device connected" })
     }
-    private fun connect(device: UsbDevice) {
-        if (connecting) return
+    private fun connect(device: UsbDevice, automatic: Boolean = false) {
+        if (connecting && !automatic) return
         val http = settings.http()
         connecting = true
         worker.execute {
         if (destroyed) { connecting = false; return@execute }
+        // Duplicate broadcast/Activity intents must not reopen the active USB fd.
+        // Nor should auto-attach switch away from a different selected device.
+        if (automatic && currentDevice != null) { connecting = false; return@execute }
+        val live = usb.deviceList[device.deviceName]
+        if (live == null || live.deviceId != device.deviceId || !supported(live) || !usb.hasPermission(live)) {
+            connecting = false
+            state("USB unavailable or permission required; select Connect")
+            return@execute
+        }
         disconnect(); state("Connecting…")
         try {
             val conn=usb.openDevice(device) ?: error("Android could not open device")
