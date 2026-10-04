@@ -105,3 +105,23 @@ The token protects daemon access; it does not turn a serial path or `DeviceId`
 into proof of physical device ownership. Applications that automate destructive
 work should inspect the descriptor and probe result, and should supply their own
 expected-device policy.
+
+## Android embedding
+
+The optional `android-usb` feature adds an Android-authorized USB fd backend;
+`desktop` remains the default for existing users. Android permission/lifecycle
+belongs to the embedding app. The Rust backend claims CDC interfaces and exposes
+bounded serial IO to the same per-device worker used on desktop. Native USB
+transfers use nusb; no TTY fd or Kotlin byte-transfer bridge is required.
+
+An attachment receives a fresh DeviceId. The sample closes its Service and joins
+workers before closing Android's UsbDeviceConnection. HTTP and local library
+calls share the Service; neither gets a second USB owner. Embedded Android hosts
+supply an app-private cache directory using `Service::start_many_in`.
+
+Android uses a pinned espflash fork with an injectable transport. Desktop and
+Android compile the same session/validation implementation against their
+respective espflash dependencies. The Android adapter supplies bulk IO and CDC
+DTR/RTS controls; desktop retains crates.io espflash and native TTY/COM ports.
+Temporary readback files use an app-private cache directory. See
+[Android](../android/README.md).

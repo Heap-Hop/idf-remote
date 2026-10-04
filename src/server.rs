@@ -400,6 +400,17 @@ impl Service {
         token: Option<String>,
         running: Arc<AtomicBool>,
     ) -> Result<(Self, Worker)> {
+        Self::start_many_in(backend, devices, token, running, None)
+    }
+
+    /// Embedded hosts can supply an app-private cache directory (Android has no /tmp).
+    pub fn start_many_in(
+        backend: Arc<dyn DeviceBackend>,
+        devices: Vec<DeviceDescriptor>,
+        token: Option<String>,
+        running: Arc<AtomicBool>,
+        cache_dir: Option<&std::path::Path>,
+    ) -> Result<(Self, Worker)> {
         ensure!(
             !devices.is_empty(),
             "at least one allowed device is required"
@@ -426,7 +437,12 @@ impl Service {
         let initial_states = runtimes
             .iter()
             .map(|(id, runtime)| (id.clone(), runtime.descriptor.status));
-        let artifact_dir = Arc::new(tempfile::Builder::new().prefix("idf-remote-").tempdir()?);
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("idf-remote-");
+        let artifact_dir = Arc::new(match cache_dir {
+            Some(path) => builder.tempdir_in(path)?,
+            None => builder.tempdir()?,
+        });
         let device_workers = Arc::new(Mutex::new(Vec::with_capacity(receivers.len())));
         let service = Self {
             inner: Arc::new(Mutex::new(Store::new(initial_states))),
@@ -863,6 +879,30 @@ impl Service {
         }
         Ok(operation)
     }
+    /// Start passive monitoring using the same admission path as HTTP.
+    pub async fn submit_monitor(&self, request: DeviceRequest, key: &str) -> Result<Operation> {
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", key.parse()?);
+        monitor(State(self.clone()), headers, Json(request))
+            .await
+            .map(|(_, Json(operation))| operation)
+            .map_err(|error| anyhow::anyhow!(error.1))
+    }
+
+    /// Send raw or multiplexed console input through the device's worker.
+    pub async fn submit_serial_write(
+        &self,
+        request: SerialWriteRequest,
+        key: &str,
+    ) -> Result<Operation> {
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", key.parse()?);
+        serial_write(State(self.clone()), headers, Json(request))
+            .await
+            .map(|(_, Json(operation))| operation)
+            .map_err(|error| anyhow::anyhow!(error.1))
+    }
+
     /// Embedded gateway entry point. Shares admission/ownership with HTTP.
     pub async fn submit_application(
         &self,
@@ -3679,6 +3719,63 @@ mod tests {
         worker.join();
     }
     #[test]
+    fn bearer_auth_protects_queries_streams_and_hardware_admission() {
+        let (_tx, rx) = mpsc::channel();
+        let backend = Arc::new(backend(rx));
+        let running = Arc::new(AtomicBool::new(true));
+        let device = test_descriptor(DeviceAvailability::Available, all_capabilities());
+        let (service, worker) = Service::start(
+            backend.clone(),
+            device,
+            Some("test-token".into()),
+            running.clone(),
+        )
+        .unwrap();
+        let app = router(service);
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for (method, path) in [
+                ("GET", "/v1/devices"),
+                ("GET", "/v1/stream"),
+                ("GET", "/v1/operations/example/artifact"),
+                ("POST", "/v1/flash"),
+                ("POST", "/v1/erase-flash"),
+                ("POST", "/v1/application"),
+                ("POST", "/v1/serial-write"),
+            ] {
+                for auth in [None, Some("Bearer wrong-token")] {
+                    let mut request = Request::builder().method(method).uri(path);
+                    if let Some(auth) = auth {
+                        request = request.header("authorization", auth);
+                    }
+                    let response = app
+                        .clone()
+                        .oneshot(request.body(Body::empty()).unwrap())
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::UNAUTHORIZED,
+                        "{method} {path}"
+                    );
+                }
+            }
+            let response = app
+                .oneshot(
+                    Request::get("/v1/devices")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        });
+        assert_eq!(backend.open_calls.load(Ordering::Relaxed), 0);
+        running.store(false, Ordering::Relaxed);
+        worker.join();
+    }
+
+    #[test]
     fn http_contract_exposes_descriptors_and_accepts_only_device_ids() {
         let (_tx, rx) = mpsc::channel();
         let running = Arc::new(AtomicBool::new(true));
@@ -3761,6 +3858,54 @@ mod tests {
         running.store(false, Ordering::Relaxed);
         worker.join();
     }
+    #[test]
+    fn embedded_monitor_and_input_share_worker_and_use_private_cache() {
+        let open_calls = Arc::new(AtomicUsize::new(0));
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let backend = Arc::new(SerialBackend {
+            open_calls: open_calls.clone(),
+            refresh_calls: Arc::new(AtomicUsize::new(0)),
+            writes: writes.clone(),
+            fail_write: Arc::new(AtomicBool::new(false)),
+            read_gate: None,
+        });
+        let running = Arc::new(AtomicBool::new(true));
+        let cache = tempfile::tempdir().unwrap();
+        let device = test_descriptor(DeviceAvailability::Available, all_capabilities());
+        let (service, worker) = Service::start_many_in(
+            backend,
+            vec![device],
+            None,
+            running.clone(),
+            Some(cache.path()),
+        )
+        .unwrap();
+        assert!(service.artifact_dir.path().starts_with(cache.path()));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        assert!(
+            runtime
+                .block_on(service.submit_monitor(request(), "bad key"))
+                .is_err()
+        );
+        runtime
+            .block_on(service.submit_monitor(request(), "embedded-monitor"))
+            .unwrap();
+        assert_eq!(wait_done(&service).status, "succeeded");
+        let input = SerialWriteRequest::from_bytes(test_device_id(), b"111", 115200, 2000).unwrap();
+        let first = runtime
+            .block_on(service.submit_serial_write(input.clone(), "embedded-input"))
+            .unwrap();
+        assert_eq!(wait_done(&service).status, "succeeded");
+        let replay = runtime
+            .block_on(service.submit_serial_write(input, "embedded-input"))
+            .unwrap();
+        assert_eq!(first.id, replay.id);
+        assert_eq!(*writes.lock().unwrap(), b"111");
+        assert_eq!(open_calls.load(Ordering::Relaxed), 1);
+        running.store(false, Ordering::Relaxed);
+        worker.join();
+    }
+
     #[test]
     fn serial_write_reuses_monitor_and_drops_it_after_write_failure() {
         let open_calls = Arc::new(AtomicUsize::new(0));

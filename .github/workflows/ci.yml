@@ -18,3 +18,24 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo build --locked --release
+  android-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+          components: clippy
+      - run: |
+          rustc --edition 2024 --test android/native/src/http_config.rs -o /tmp/idfr-http-config-tests
+          /tmp/idfr-http-config-tests
+      - run: cargo test --locked --no-default-features --features android-usb
+      - run: cargo clippy --locked --no-default-features --features android-usb --target aarch64-linux-android --lib -- -D warnings
+      - run: cargo check --locked --manifest-path android/native/Cargo.toml --target aarch64-linux-android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Android UI regression tests and lint
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest :app:lintDebug

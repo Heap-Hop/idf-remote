@@ -128,3 +128,9 @@ This project has primarily been developed with AI assistance, and its code is re
 ## License
 
 [Apache-2.0](LICENSE).
+
+## Android (experimental)
+
+An [Android USB host sample](android/README.md) embeds the Rust library for
+flashing, console monitoring and application calls, with loopback or
+token-authenticated LAN access. It currently supports Espressif native USB Serial/JTAG.
