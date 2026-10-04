@@ -198,16 +198,14 @@ class MainActivity : Activity() {
             activeHttp=http
             currentDevice=device.deviceName
             val id=handle; val active=AtomicBoolean(true); running=active
+            val consoleEvents = ConsoleEvents()
             reader=Thread({
                 try {
                     while (active.get()) {
                         val batch=JSONObject(Native.poll(id)); val events=batch.getJSONArray("events")
                         for (i in 0 until events.length()) {
-                            val event=events.getJSONObject(i); val kind=event.getString("kind"); val data=event.getJSONObject("data")
-                            when (kind) {
-                                "log" -> append(data.optString("text")+"\n")
-                                "application_event", "application_connected", "application_disconnected", "reconnecting", "reconnected" -> append("[$kind $data]\n")
-                            }
+                            try { append(consoleEvents.render(events.getJSONObject(i))) }
+                            catch (e: Exception) { append("[Invalid event skipped: ${e.message}]\n") }
                         }
                         Thread.sleep(30)
                     }
