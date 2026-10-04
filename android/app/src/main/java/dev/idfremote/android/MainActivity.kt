@@ -38,7 +38,9 @@ class MainActivity : Activity() {
     @Volatile private var currentDevice: String? = null
     private var reader: Thread? = null
     private var running = AtomicBoolean(false)
-    private var permissionPending: String? = null // UI-owned
+    private data class PermissionRequest(val device: UsbDevice, val id: Int)
+    private var permissionPending: PermissionRequest? = null // UI-owned
+    private var nextPermissionRequest = 0
     private val permissionAction get() = "$packageName.USB_PERMISSION"
     private fun append(text: String) { synchronized(pending) {
         pending.append(text)
@@ -65,13 +67,18 @@ class MainActivity : Activity() {
             val device = intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
             when (intent.action) {
                 permissionAction -> {
-                    if (device?.deviceName != permissionPending) return
+                    val request = permissionPending ?: return
+                    if (intent.getIntExtra("request_id", -1) != request.id ||
+                        device?.deviceName != request.device.deviceName || device.deviceId != request.device.deviceId) return
                     permissionPending = null
-                    if (device != null && usb.hasPermission(device)) connect(device)
+                    val live = usb.deviceList[request.device.deviceName]
+                    if (live == null || live.deviceId != request.device.deviceId || !supported(live))
+                        state("USB unavailable; select Connect again")
+                    else if (usb.hasPermission(live)) connect(live)
                     else state("USB permission denied")
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
-                    if (device?.deviceName == permissionPending) permissionPending = null
+                    if (device?.deviceName == permissionPending?.device?.deviceName) permissionPending = null
                     worker.execute { if (currentDevice == device?.deviceName) { disconnect(); state("USB detached • waiting for authorized reconnect") } }
                     refresh()
                 }
@@ -147,9 +154,21 @@ class MainActivity : Activity() {
                 isEnabled=supported(device)
                 setOnClickListener {
                     if (usb.hasPermission(device)) connect(device) else {
-                        permissionPending=device.deviceName
-                        usb.requestPermission(device,PendingIntent.getBroadcast(this@MainActivity,0,
-                            Intent(permissionAction).setPackage(packageName),PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+                        if (permissionPending != null) return@setOnClickListener
+                        val request = PermissionRequest(device, ++nextPermissionRequest)
+                        permissionPending = request
+                        // Immutable callbacks retain our device/request snapshot. Android's
+                        // fill-in extras are ignored; hasPermission remains authoritative.
+                        val callback = PendingIntent.getBroadcast(this@MainActivity, request.id,
+                            Intent(permissionAction).setPackage(packageName)
+                                .putExtra(UsbManager.EXTRA_DEVICE, device).putExtra("request_id", request.id),
+                            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE)
+                        try { usb.requestPermission(device, callback) }
+                        catch (e: Exception) {
+                            permissionPending = null
+                            callback.cancel()
+                            state("USB permission request failed: ${e.message}")
+                        }
                     }
                 }
             })
