@@ -46,7 +46,7 @@ under Heap-Hop on `feat/android-transport` and pinned by revision.
 
 ## Validation evidence
 
-- ARM64 Android library + APK build; Android lint: 0 errors, 19 sample/tooling warnings.
+- ARM64 Android library + APK build; Android lint: 0 errors, 20 sample/tooling warnings.
 - Desktop regression suite and no-default-feature library tests passed; host and Android clippy passed.
 - Wireless ADB forwards the phone's loopback service to a separate desktop port.
 - HTTP status/echo and plain + multiplexed console input passed on gateway-demo.
@@ -70,6 +70,17 @@ under Heap-Hop on `feat/android-transport` and pinned by revision.
 - [x] Test phone saved a default-app association including the board USB serial; system launch connected automatically.
 - [x] User-confirmed second physical replug restored logs; host verified automatic reconnect and authenticated LAN discovery.
 - [x] Phone UI verification: new logs follow the tail, manual scrollback stays fixed during output, and Latest logs resumes following. APK build and lint passed.
+
+## PR review corrections
+
+- [x] Preserve device identity and a unique request token in immutable USB permission callbacks; recheck live permission and ignore stale callbacks.
+- [x] Render raw console bytes incrementally with attachment-local UTF-8 state, without duplicate log records.
+- [x] Accept arbitrary JSON application events; skip malformed events without terminating the reader.
+- [x] Separate application waits from console input with bounded application admission and attachment-scoped JNI leases.
+- [x] Explicitly join native workers before closing Java USB, even when another caller retains a gateway reference.
+- [x] Five JVM regression tests, APK build, native Android check/clippy and lint passed. UI tests and lint now run in CI.
+- [x] Phone UI: Tab and Ctrl-C echoes arrived more than two seconds before delay(2500) completed. Disconnect/reconnect during a delayed call allocated a fresh attachment and recovered application negotiation without displaying the old result.
+- [ ] Fresh manual permission grant/denial after the callback correction; the connected test board already had permission.
 
 ## Proposed next milestone: separate HTTP and USB lifetimes
 

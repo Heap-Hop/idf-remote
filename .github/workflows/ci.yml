@@ -32,3 +32,10 @@ jobs:
       - run: cargo test --locked --no-default-features --features android-usb
       - run: cargo clippy --locked --no-default-features --features android-usb --target aarch64-linux-android --lib -- -D warnings
       - run: cargo check --locked --manifest-path android/native/Cargo.toml --target aarch64-linux-android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Android UI regression tests and lint
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest :app:lintDebug

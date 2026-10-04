@@ -18,7 +18,8 @@ on desktop. Kotlin never performs USB transfers.
 - Foreground sample, one selected USB device. System-authorized attach events
   reconnect automatically. Application negotiation is explicit; commands are never
   replayed automatically. No background service or persistent device pairing yet.
-- Logs follow the latest output by default. Scroll up to read history; scroll
+- Console bytes are displayed incrementally, including prompts without newlines.
+  Logs follow the latest output by default. Scroll up to read history; scroll
   back to the bottom or tap **Latest logs** to resume. It is not an ANSI terminal emulator.
 
 ## Build
@@ -127,6 +128,21 @@ success indicates bytes accepted by the driver, not a firmware acknowledgement.
 
 The JNI sample keeps protocol decisions in Rust; its Kotlin UI is replaceable.
 See [PLAN.md](PLAN.md) for validation and remaining work before PR review.
+
+Application waits run separately from console submissions, with no queued
+application backlog. Closing an attachment rejects new work, waits for existing
+JNI calls, then shuts down native workers before closing the Java USB connection.
+Results from retired attachments cannot update a new connection's UI.
+
+Run JVM regression tests and Android lint from `android`:
+
+```sh
+./gradlew :app:testDebugUnitTest :app:lintDebug
+```
+
+These tests cover incremental UTF-8, arbitrary JSON events, concurrent console
+submission and orderly connection close. They do not exercise USB permission
+dialogs or hardware.
 
 ## Flashing through the phone
 

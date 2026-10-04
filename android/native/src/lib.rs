@@ -31,18 +31,23 @@ struct Gateway {
     device: DeviceId,
     cursor: Mutex<Cursor>,
     running: Arc<AtomicBool>,
-    worker: Option<Worker>,
+    worker: Mutex<Option<Worker>>,
     http: tokio::task::JoinHandle<()>,
     runtime: Runtime,
 }
-impl Drop for Gateway {
-    fn drop(&mut self) {
+impl Gateway {
+    fn shutdown(&self) {
         self.running.store(false, Ordering::Release);
         self.http.abort();
-        if let Some(worker) = self.worker.take() {
+        if let Some(worker) = self.worker.lock().unwrap().take() {
             worker.join();
         }
         self.backend.detach(&self.device);
+    }
+}
+impl Drop for Gateway {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 static GATEWAYS: OnceLock<Mutex<HashMap<i64, Arc<Gateway>>>> = OnceLock::new();
@@ -65,6 +70,10 @@ fn key() -> String {
 fn finish(g: &Gateway, operation: Operation) -> Result<Operation> {
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
+        ensure!(
+            g.running.load(Ordering::Acquire),
+            "Android gateway is closed"
+        );
         let current = g
             .service
             .get_operation(&operation.id)
@@ -114,7 +123,7 @@ fn open(fd: i32, cache: &str, http: HttpConfig) -> Result<i64> {
             after: 0,
         }),
         running,
-        worker: Some(worker),
+        worker: Mutex::new(Some(worker)),
         http,
         runtime,
     };
@@ -239,5 +248,9 @@ pub extern "system" fn Java_dev_idfremote_android_Native_application(
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_idfremote_android_Native_close(_: JNIEnv, _: JClass, id: jlong) {
     let g = registry().lock().unwrap().remove(&id);
-    drop(g);
+    // In-flight HTTP/JNI calls may still hold an Arc. Close hardware now rather
+    // than deferring worker shutdown until the last caller drops its reference.
+    if let Some(g) = g {
+        g.shutdown();
+    }
 }

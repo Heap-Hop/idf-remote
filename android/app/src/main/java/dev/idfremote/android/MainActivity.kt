@@ -34,13 +34,12 @@ class MainActivity : Activity() {
     private lateinit var devices: LinearLayout
     @Volatile private var destroyed = false
     private var connection: UsbDeviceConnection? = null // worker-owned
-    private var handle = 0L
+    @Volatile private var session: GatewaySession? = null
     @Volatile private var currentDevice: String? = null
     private var reader: Thread? = null
     private var running = AtomicBoolean(false)
-    private data class PermissionRequest(val device: UsbDevice, val id: Int)
+    private data class PermissionRequest(val device: UsbDevice, val id: String)
     private var permissionPending: PermissionRequest? = null // UI-owned
-    private var nextPermissionRequest = 0
     private val permissionAction get() = "$packageName.USB_PERMISSION"
     private fun append(text: String) { synchronized(pending) {
         pending.append(text)
@@ -68,7 +67,7 @@ class MainActivity : Activity() {
             when (intent.action) {
                 permissionAction -> {
                     val request = permissionPending ?: return
-                    if (intent.getIntExtra("request_id", -1) != request.id ||
+                    if (intent.getStringExtra("request_id") != request.id ||
                         device?.deviceName != request.device.deviceName || device.deviceId != request.device.deviceId) return
                     permissionPending = null
                     val live = usb.deviceList[request.device.deviceName]
@@ -155,14 +154,14 @@ class MainActivity : Activity() {
                 setOnClickListener {
                     if (usb.hasPermission(device)) connect(device) else {
                         if (permissionPending != null) return@setOnClickListener
-                        val request = PermissionRequest(device, ++nextPermissionRequest)
+                        val request = PermissionRequest(device, java.util.UUID.randomUUID().toString())
                         permissionPending = request
                         // Immutable callbacks retain our device/request snapshot. Android's
                         // fill-in extras are ignored; hasPermission remains authoritative.
-                        val callback = PendingIntent.getBroadcast(this@MainActivity, request.id,
+                        val callback = PendingIntent.getBroadcast(this@MainActivity, request.id.hashCode(),
                             Intent(permissionAction).setPackage(packageName)
                                 .putExtra(UsbManager.EXTRA_DEVICE, device).putExtra("request_id", request.id),
-                            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE)
+                            PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE)
                         try { usb.requestPermission(device, callback) }
                         catch (e: Exception) {
                             permissionPending = null
@@ -194,10 +193,11 @@ class MainActivity : Activity() {
         try {
             val conn=usb.openDevice(device) ?: error("Android could not open device")
             connection=conn
-            handle=Native.open(conn.fileDescriptor,cacheDir.absolutePath,http.lan,http.port,http.token)
+            val id=Native.open(conn.fileDescriptor,cacheDir.absolutePath,http.lan,http.port,http.token)
+            session=GatewaySession(id)
             activeHttp=http
             currentDevice=device.deviceName
-            val id=handle; val active=AtomicBoolean(true); running=active
+            val active=AtomicBoolean(true); running=active
             val consoleEvents = ConsoleEvents()
             reader=Thread({
                 try {
@@ -217,20 +217,46 @@ class MainActivity : Activity() {
         } catch (e: Exception) { disconnect(); state("Connect failed: ${e.message}") }
         finally { connecting = false }
     } }
-    private fun send(text: String) { worker.execute {
-        try { check(handle!=0L){"Not connected"}; val result=JSONObject(Native.write(handle,text.toByteArray(Charsets.UTF_8)))
-            append("[console accepted: ${result.opt("result")}]\n")
-        } catch (e: Exception) { state("Console failed (not replayed): ${e.message}") }
-    } }
-    private fun application(method: String, params: String) { worker.execute {
-        try { check(handle!=0L){"Not connected"}; val result=JSONObject(Native.application(handle,method,params))
-            state("${if(method.isEmpty()) "Application connected" else method}: ${result.opt("result")}")
-        } catch (e: Exception) { state("Application failed (not replayed): ${e.message}") }
-    } }
+    private fun report(owner: GatewaySession, text: String, asState: Boolean = true) {
+        ui.post {
+            if (!destroyed && session === owner && owner.isOpen) {
+                if (asState) {
+                    android.util.Log.i("IdfRemote", text)
+                    append("\n[$text]\n")
+                    status.text = text
+                } else append(text)
+            }
+        }
+    }
+    private fun send(text: String) {
+        val owner = session ?: return state("Not connected")
+        worker.execute {
+            try {
+                val result = owner.use { JSONObject(Native.write(it, text.toByteArray(Charsets.UTF_8))) }
+                report(owner, "[console accepted: ${result.opt("result")}]\n", asState = false)
+            } catch (e: Exception) { report(owner, "Console failed (not replayed): ${e.message}") }
+        }
+    }
+    private fun application(method: String, params: String) {
+        val owner = session ?: return state("Not connected")
+        try {
+            owner.application { id ->
+                try {
+                    val result = JSONObject(Native.application(id, method, params))
+                    report(owner, "${if(method.isEmpty()) "Application connected" else method}: ${result.opt("result")}")
+                } catch (e: Exception) { report(owner, "Application failed (not replayed): ${e.message}") }
+            }
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            report(owner, "Application busy; command not sent")
+        } catch (e: Exception) { report(owner, "Application not sent: ${e.message}") }
+    }
     private fun disconnect() {
+        val owner = session
+        session = null // Stop admission and suppress results from this attachment.
         connected(false); running.set(false); reader?.join(); reader=null
-        if (handle!=0L) Native.close(handle)
-        handle=0; activeHttp=null; connection?.close(); connection=null; currentDevice=null
+        // Await outstanding JNI leases and close native workers before Java USB.
+        owner?.close { Native.close(it) }
+        activeHttp=null; connection?.close(); connection=null; currentDevice=null
     }
     override fun onDestroy() {
         destroyed=true; unregisterReceiver(receiver); ui.removeCallbacksAndMessages(null)
