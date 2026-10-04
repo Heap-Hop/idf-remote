@@ -1,8 +1,8 @@
 # Android implementation plan
 
-Branch: `feat/android-usb-host`. Keep changes local until user hardware acceptance;
-then prepare a PR. The separately authorized espflash fork is published under
-Heap-Hop on `feat/android-transport`; idf-remote remains local until acceptance.
+Branch: `feat/android-usb-host`, targeting `master`. User hardware acceptance is
+complete; the Android MVP is ready for PR review. The espflash fork is published
+under Heap-Hop on `feat/android-transport` and pinned by revision.
 
 ## Library and sample
 
@@ -17,7 +17,7 @@ Heap-Hop on `feat/android-transport`; idf-remote remains local until acceptance.
 - [x] Three explicit close/open cycles with fresh attachment IDs and successful application renegotiation.
 - [x] Physical detach/replug and default-app automatic reconnect of the integrated sample.
 - [ ] Permission-denial testing of the integrated sample.
-- [ ] User acceptance before PR creation.
+- [x] User hardware acceptance before PR creation.
 
 ## Flash milestone
 
