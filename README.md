@@ -132,6 +132,15 @@ and remote clients can use its HTTP API. See [Application protocol](docs/APPLICA
 for interfaces and session behavior. Ordinary flash and monitor use needs no
 special firmware component.
 
+## Agent skill
+
+Install the [idf-remote skill](skills/idf-remote/SKILL.md) to help a coding agent
+set up remote access, flash firmware, capture logs, and use the optional gateway:
+
+```sh
+npx skills add Heap-Hop/idf-remote --skill idf-remote
+```
+
 ## Development
 
 Build from source with current stable Rust:
