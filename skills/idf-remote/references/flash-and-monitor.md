@@ -30,6 +30,26 @@ Image paths in a portable plan are relative to the plan file. Do not combine
 than inventing a flash layout. Use `--image app` only when an application-only
 update is intended and the board already has compatible supporting images.
 
+## Rust ELF sources
+
+Generate and inspect a persistent bundle before flashing:
+
+```sh
+idfr plan --chip esp32s3 --elf APP_ELF --output NEW_PLAN_DIR
+idfr plan --plan NEW_PLAN_DIR/plan.json
+```
+
+For esp-idf-sys, pass `--bootloader BOOTLOADER_BIN` and
+`--partition-table PARTITION_TABLE_BIN` from the same build. idfr does not discover
+Cargo build outputs. esp-hal projects can use built-in images or `espflash.toml`.
+Check the chip and partition layout, including the selected app partition.
+`--app-only` requires compatible supporting images already on the board.
+
+ELF image settings follow CLI > `espflash.toml` > built-in defaults. Config is
+searched in CWD, its immediate parent, then the user espflash config directory;
+relative paths use CWD. ESP32/C2 need `--xtal-freq` for built-in bootloaders;
+P4 needs an explicit bootloader. See [ELF inputs](../../../docs/ELF.md).
+
 ## Flash and collect evidence
 
 After selecting and verifying the authorized board, flash the validated source:

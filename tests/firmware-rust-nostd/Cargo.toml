@@ -1,0 +1,24 @@
+[package]
+name = "idfr-fixture-nostd"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[features]
+default = ["console-uart"]
+console-uart = ["esp-println/uart"]
+console-usb-jtag = ["esp-println/jtag-serial"]
+
+[dependencies]
+esp-hal = { version = "=1.0.0", features = ["esp32s3"] }
+esp-println = { version = "=0.16.0", default-features = false, features = ["esp32s3"] }
+esp-bootloader-esp-idf = { version = "=0.3.0", features = ["esp32s3"] }
+
+[profile.release]
+opt-level = "s"
+debug = 2
+codegen-units = 1
+lto = "fat"

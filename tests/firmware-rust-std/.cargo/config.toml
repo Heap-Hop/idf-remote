@@ -1,0 +1,22 @@
+[build]
+target = "xtensa-esp32s3-espidf"
+target-dir = "../../.artifacts/firmware-rust-std"
+
+[target.xtensa-esp32s3-espidf]
+linker = "ldproxy"
+rustflags = ["--cfg", "espidf_time64"]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+# The relocated target directory must not become the inferred project root.
+CARGO_WORKSPACE_DIR = { value = "", relative = true }
+# Copy the CSV into esp-idf-sys's generated CMake project.
+ESP_IDF_GLOB_BASE = { value = "", relative = true }
+ESP_IDF_GLOB_PARTITIONS = "partitions.csv"
+ESP_IDF_TOOLS_INSTALL_DIR = "custom:../../.artifacts/.embuild/espressif"
+ESP_IDF_SDKCONFIG = "../../.artifacts/firmware-rust-std/sdkconfig"
+MCU = "esp32s3"
+ESP_IDF_VERSION = "v5.4.2"
+ESP_IDF_SDKCONFIG_DEFAULTS = "sdkconfig.defaults"

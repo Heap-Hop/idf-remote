@@ -303,7 +303,7 @@ pub(super) fn validate(plan: &PreparedPlan) -> Result<Chip> {
                 .is_none_or(|size| size == data[3] >> 4);
         ensure!(
             matches,
-            "bootloader header disagrees with flash_settings; phase 1 preserves image bytes (including their digest). Rebuild with matching settings or supply a plan using keep"
+            "bootloader header disagrees with flash_settings; the backend preserves supplied image bytes (including their digest). Rebuild or regenerate the plan with matching settings"
         );
     }
     Ok(chip)

@@ -22,6 +22,22 @@ vectors (requires Python 3 and a C compiler):
 python3 tests/test_mux_codec.py
 ```
 
+## ELF conversion
+
+Host tests generate synthetic ELF data in memory, exercise config resolution,
+portable exports, malformed inputs, and multipart upload lifetime. They do not
+contain executable firmware or open serial ports. Compare with an independently
+installed espflash 4.5.0 CLI:
+
+```sh
+ESPFLASH=ESPFLASH_EXECUTABLE cargo test --locked --test elf_reference -- --ignored
+```
+
+This opt-in test requires Python 3 and fails if the reference CLI is missing or
+has the wrong version. Linux CI runs it. For actual C, Rust no_std, and Rust std
+source builds, pinned toolchains, differential reports, and the manual firmware
+workflow, see [ELF fixtures](tests/ELF_FIXTURES.md).
+
 ## Hardware tests
 
 Use a dedicated test board. Identify its current port and expected USB serial

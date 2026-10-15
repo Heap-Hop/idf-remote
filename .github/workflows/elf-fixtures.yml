@@ -1,0 +1,39 @@
+name: ELF source fixtures
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  source-fixtures:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev libssl-dev pkg-config cmake ninja-build python3-venv libclang-dev libusb-1.0-0
+          cargo install espflash --version 4.5.0 --locked
+          cargo install espup --version 0.18.0 --locked
+          cargo install ldproxy --version 0.3.4 --locked
+          mkdir -p .artifacts
+          espup install --targets esp32s3 --toolchain-version 1.90.0 --export-file "$PWD/.artifacts/esp-export.sh"
+      - run: cargo build --locked --release
+      - name: Build and compare Rust fixtures
+        run: |
+          source .artifacts/esp-export.sh
+          python3 tests/run_elf_fixtures.py --idfr target/release/idfr --espflash "$(command -v espflash)" --output .artifacts/real-fixtures
+      - name: Build and verify C fixture
+        run: |
+          export IDF_TOOLS_PATH="$PWD/.artifacts/.embuild/espressif"
+          python3 "$IDF_TOOLS_PATH/esp-idf/v5.4.2/tools/idf_tools.py" install --targets esp32s3
+          source "$IDF_TOOLS_PATH/esp-idf/v5.4.2/export.sh"
+          idf.py -C tests/firmware -B "$PWD/.artifacts/firmware-c" -D SDKCONFIG="$PWD/.artifacts/firmware-c/sdkconfig" -D IDF_TARGET=esp32s3 build
+          python3 tests/check_idf_fixture.py --idfr target/release/idfr --build-dir .artifacts/firmware-c --output .artifacts/real-fixtures/c.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: elf-fixture-reports
+          path: |
+            .artifacts/real-fixtures/**/*.json
+            .artifacts/real-fixtures/*.log

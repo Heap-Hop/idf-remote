@@ -18,6 +18,12 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo build --locked --release
+      - name: Install pinned image reference CLI
+        if: runner.os == 'Linux'
+        run: cargo install espflash --version 4.5.0 --locked --root .artifacts/tools
+      - name: Compare synthetic ELF images with espflash
+        if: runner.os == 'Linux'
+        run: ESPFLASH="$PWD/.artifacts/tools/bin/espflash" cargo test --locked --test elf_reference -- --ignored
   android-core:
     runs-on: ubuntu-latest
     steps:

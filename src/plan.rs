@@ -22,7 +22,7 @@ pub struct FlashPlan {
     pub segments: Vec<FileSegment>,
 }
 
-/// Values assert the existing bootloader header; phase 1 never rewrites images.
+/// Values assert the supplied bootloader header, including client-generated ELF images.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlashSettings {

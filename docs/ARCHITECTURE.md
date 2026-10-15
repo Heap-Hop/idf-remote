@@ -58,8 +58,11 @@ rejected.
 
 ## Flash flow
 
-The client imports either a portable `FlashPlan` or an ESP-IDF
-`flasher_args.json`. It resolves image paths locally, rejects invalid ranges and
+The client imports a portable `FlashPlan`, an ESP-IDF `flasher_args.json`, or
+converts an ELF with the pinned espflash image library. ELF conversion may rewrite
+image headers and digests on the client; imported binary images are preserved.
+The daemon always writes the supplied bytes. The client resolves image paths
+locally, rejects invalid ranges and
 overlapping erase sectors, snapshots the files, and computes their digests.
 
 The server verifies the upload and plan before opening hardware. The device
