@@ -12,7 +12,9 @@ Supported options are `--bootloader`, `--partition-table` (CSV or binary),
 `--flash-freq`, `--flash-size`, and `--xtal-freq`. Offsets accept decimal or `0x`
 hexadecimal. Frequencies accept forms such as `80mhz`, `80MHz`, and `80m`;
 flash sizes accept forms such as `4MB`. `keep` and `detect` are not ELF options.
-`--app-only` emits only the selected application segment.
+`--app-only` emits only the selected application segment. Explicit targets must
+have type `app`. Default selection prefers an app partition named `factory`,
+then the first app partition; a data partition named `factory` is skipped.
 
 Image values resolve independently: command line, then `espflash.toml`, then
 espflash's built-in defaults. Flash size defaults to 4MB. For esp-idf-sys, pass
@@ -56,6 +58,11 @@ a built-in bootloader. An explicit bootloader, including one from config,
 resolves that choice. ESP32-P4 requires an explicit bootloader because the pinned
 library's chip-revision selection API is private. idfr does not substitute the
 minimum supported revision for the actual device revision.
+
+An ELF must contain an IDF application descriptor, recognized by the
+`esp_app_desc` symbol or the `.flash.appdesc` / `.rodata_desc` section, matching
+espflash's default check. esp-hal applications should include
+`esp_bootloader_esp_idf::esp_app_desc!()`. Descriptor-free ELF inputs are rejected.
 
 The ELF's declared minimum chip revision remains a floor enforced by espflash.
 ELF architecture and available chip metadata are checked against `--chip`;

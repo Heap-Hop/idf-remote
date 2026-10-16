@@ -25,8 +25,9 @@ python3 tests/test_mux_codec.py
 ## ELF conversion
 
 Host tests generate synthetic ELF data in memory, exercise config resolution,
-portable exports, malformed inputs, and multipart upload lifetime. They do not
-contain executable firmware or open serial ports. Compare with an independently
+portable exports, missing descriptors, invalid partition targets, malformed
+inputs, and multipart upload lifetime. They do not contain executable firmware
+or open serial ports. Compare with an independently
 installed espflash 4.5.0 CLI:
 
 ```sh
@@ -34,8 +35,10 @@ ESPFLASH=ESPFLASH_EXECUTABLE cargo test --locked --test elf_reference -- --ignor
 ```
 
 This opt-in test requires Python 3 and fails if the reference CLI is missing or
-has the wrong version. Linux CI runs it. For actual C, Rust no_std, and Rust std
-source builds, pinned toolchains, differential reports, and the manual firmware
+has the wrong version. Synthetic ELF fixtures include an application descriptor;
+the reference CLI runs with its default descriptor check for S3 and C6. Linux CI
+runs it. For actual C, Rust no_std, and Rust std source builds, pinned toolchains,
+differential reports, and the manual firmware
 workflow, see [ELF fixtures](tests/ELF_FIXTURES.md).
 
 ## Hardware tests

@@ -39,11 +39,11 @@ def main():
     parser.add_argument("--idfr", required=True, type=Path)
     parser.add_argument("--espflash", required=True, type=Path)
     parser.add_argument("--elf", required=True, type=Path)
-    parser.add_argument("--chip", default="esp32s3", choices=["esp32s3", "esp32c3"])
+    parser.add_argument("--chip", default="esp32s3", choices=["esp32s3", "esp32c3", "esp32c6"])
     parser.add_argument("--bootloader", type=Path)
     parser.add_argument("--partition-table", type=Path)
     parser.add_argument("--output", required=True, type=Path, help="New report directory")
-    parser.add_argument("--synthetic", action="store_true", help="Allow a synthetic ELF without an app descriptor")
+    parser.add_argument("--synthetic", action="store_true", help="Label the report as synthetic ELF data")
     args = parser.parse_args()
     idfr, espflash, elf = args.idfr.resolve(), args.espflash.resolve(), args.elf.resolve()
     supplied = []
@@ -57,8 +57,6 @@ def main():
     assert version == "espflash 4.5.0", version
     common = ["--chip", args.chip, "--flash-size", "4mb"]
     reference = [espflash, "save-image", "--skip-update-check", *common]
-    if args.synthetic:
-        reference += ["--ignore-app-descriptor"]
     # Reference-derived support images: never use idfr output as the oracle.
     run([*reference, *supplied, "--partition-table-offset", "0x8000", "--merge", elf, "seed.bin"], root)
     seed = (root / "seed.bin").read_bytes()

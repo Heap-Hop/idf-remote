@@ -18,7 +18,7 @@ required-features = ["desktop"]
 
 [features]
 default = ["desktop"]
-desktop = ["dep:espflash", "dep:serialport", "dep:clap", "dep:crossterm", "dep:ctrlc", "dep:reqwest", "dep:toml", "dep:directories", "dep:object"]
+desktop = ["dep:espflash", "dep:serialport", "dep:clap", "dep:crossterm", "dep:ctrlc", "dep:reqwest", "dep:toml", "dep:directories", "dep:object", "dep:esp-idf-part"]
 android-usb = ["dep:nusb", "dep:espflash-android", "dep:serialport"]
 
 [[example]]
@@ -30,6 +30,7 @@ name = "cli"
 required-features = ["desktop"]
 
 [dependencies]
+esp-idf-part = { version = "=0.6.0", optional = true }
 toml = { version = "1.1", optional = true }
 directories = { version = "6", optional = true }
 object = { version = "0.39", optional = true, default-features = false, features = ["read", "std", "elf"] }

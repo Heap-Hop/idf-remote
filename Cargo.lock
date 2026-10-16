@@ -994,6 +994,7 @@ dependencies = [
  "crossterm",
  "ctrlc",
  "directories",
+ "esp-idf-part",
  "espflash 4.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "espflash 4.5.0 (git+https://github.com/Heap-Hop/espflash?rev=532cd5918081f471e5f18ae8f40cf8eb079f1fce)",
  "nusb",

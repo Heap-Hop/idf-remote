@@ -777,3 +777,175 @@ async fn json_flash_capture_replays_early_boot_without_duplicate_events() {
         assert_eq!(events.iter().filter(|event| event["seq"] == seq).count(), 1);
     }
 }
+
+#[test]
+fn elf_requires_app_descriptor_before_export_or_http() {
+    let project = elf_project();
+    for (chip, riscv) in [("esp32s3", false), ("esp32c6", true)] {
+        fs::write(
+            project.path().join("app.elf"),
+            support::elf_with_descriptor(None, riscv),
+        )
+        .unwrap();
+        for action in ["plan", "flash"] {
+            let output = command()
+                .current_dir(project.path())
+                .args([
+                    "--url",
+                    "http://127.0.0.1:1",
+                    action,
+                    "--elf",
+                    "app.elf",
+                    "--chip",
+                    chip,
+                    "--output",
+                    "bundle",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                !output.status.success(),
+                "{chip} {action} accepted missing descriptor"
+            );
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(error.contains("app descriptor"), "{error}");
+            assert!(!project.path().join("bundle").exists());
+        }
+    }
+}
+
+#[test]
+fn elf_accepts_descriptor_sections_and_symbol() {
+    for (chip, riscv) in [("esp32s3", false), ("esp32c6", true)] {
+        let project = elf_project();
+        for (index, name) in [".flash.appdesc", ".rodata_desc", ".rodata"]
+            .into_iter()
+            .enumerate()
+        {
+            fs::write(
+                project.path().join("app.elf"),
+                support::elf_with_descriptor(Some(name), riscv),
+            )
+            .unwrap();
+            let output = command()
+                .current_dir(project.path())
+                .args([
+                    "plan",
+                    "--elf",
+                    "app.elf",
+                    "--chip",
+                    chip,
+                    "--output",
+                    &format!("bundle{index}"),
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{chip} {name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}
+
+#[test]
+fn elf_rejects_data_partition_targets_before_export_or_http() {
+    let csv = "nvs,data,nvs,0x9000,0x17000\nfactory,app,factory,0x20000,0x100000\n";
+    for table in [None, Some("parts.csv"), Some("parts.bin")] {
+        for config in [false, true] {
+            for app_only in [false, true] {
+                let project = elf_project();
+                fs::write(project.path().join("parts.csv"), csv).unwrap();
+                let binary = esp_idf_part::PartitionTable::try_from(csv.as_bytes())
+                    .unwrap()
+                    .to_bin()
+                    .unwrap();
+                fs::write(project.path().join("parts.bin"), binary).unwrap();
+                if config {
+                    let setting = table
+                        .map(|path| format!("partition_table = '{path}'\n"))
+                        .unwrap_or_default();
+                    fs::write(
+                        project.path().join("espflash.toml"),
+                        format!("[idf]\n{setting}target_app_partition = 'nvs'\n"),
+                    )
+                    .unwrap();
+                }
+                for action in ["plan", "flash"] {
+                    let mut cmd = command();
+                    cmd.current_dir(project.path()).args([
+                        "--url",
+                        "http://127.0.0.1:1",
+                        action,
+                        "--elf",
+                        "app.elf",
+                        "--chip",
+                        "esp32s3",
+                        "--output",
+                        "bundle",
+                    ]);
+                    if !config {
+                        cmd.args(["--target-app-partition", "nvs"]);
+                        if let Some(table) = table {
+                            cmd.args(["--partition-table", table]);
+                        }
+                    }
+                    if app_only {
+                        cmd.arg("--app-only");
+                    }
+                    let output = cmd.output().unwrap();
+                    assert!(!output.status.success(), "accepted data partition");
+                    let error = String::from_utf8_lossy(&output.stderr);
+                    assert!(error.contains("not an app partition"), "{error}");
+                    assert!(!project.path().join("bundle").exists());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn elf_default_partition_selection_skips_data_named_factory() {
+    let csv = "factory,data,nvs,0x9000,0x17000\nmain,app,factory,0x20000,0x100000\n";
+    for binary in [false, true] {
+        for app_only in [false, true] {
+            let project = elf_project();
+            let data = if binary {
+                esp_idf_part::PartitionTable::try_from(csv.as_bytes())
+                    .unwrap()
+                    .to_bin()
+                    .unwrap()
+            } else {
+                csv.as_bytes().to_vec()
+            };
+            fs::write(project.path().join("parts"), data).unwrap();
+            let mut cmd = command();
+            cmd.current_dir(project.path()).args([
+                "plan",
+                "--elf",
+                "app.elf",
+                "--chip",
+                "esp32s3",
+                "--partition-table",
+                "parts",
+                "--output",
+                "bundle",
+            ]);
+            if app_only {
+                cmd.arg("--app-only");
+            }
+            let output = cmd.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                plan["segments"].as_array().unwrap().last().unwrap()["offset"],
+                0x20000
+            );
+        }
+    }
+}

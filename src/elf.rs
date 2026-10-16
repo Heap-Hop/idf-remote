@@ -7,12 +7,13 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
+use esp_idf_part::{PartitionTable, Type};
 use espflash::{
     flasher::{FlashData, FlashFrequency, FlashMode, FlashSettings as ImageSettings, FlashSize},
     image_format::idf::IdfBootloaderFormat,
     target::{Chip, XtalFrequency},
 };
-use object::{Object, ObjectSection};
+use object::{Object, ObjectSection, ObjectSymbol};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -216,7 +217,35 @@ fn validate_elf(bytes: &[u8], chip: Chip) -> Result<()> {
         }
     }
     ensure!(loaded, "ELF has no loadable data");
+    // Match espflash's CLI check, including stripped section-based descriptors.
+    ensure!(
+        elf.symbols()
+            .any(|symbol| symbol.name() == Ok("esp_app_desc"))
+            || elf.section_by_name(".flash.appdesc").is_some()
+            || elf.section_by_name(".rodata_desc").is_some(),
+        "ELF app descriptor missing; esp-hal applications need esp_bootloader_esp_idf::esp_app_desc!()"
+    );
     Ok(())
+}
+
+fn select_app_partition(table: &PartitionTable, target: Option<&str>) -> Result<String> {
+    let partition = if let Some(name) = target {
+        table
+            .find(name)
+            .with_context(|| format!("app partition {name:?} not found"))?
+    } else {
+        table
+            .find("factory")
+            .filter(|p| p.ty() == Type::App)
+            .or_else(|| table.find_by_type(Type::App))
+            .context("partition table has no app partition")?
+    };
+    ensure!(
+        partition.ty() == Type::App,
+        "target partition {:?} is not an app partition",
+        partition.name()
+    );
+    Ok(partition.name())
 }
 
 /// Owns converted bytes. Conversion and validation complete before export or HTTP.
@@ -283,9 +312,17 @@ pub fn convert(path: &Path, options: &Options) -> Result<Converted> {
     } else {
         None
     };
+    let mut target_app_partition = image.target_app_partition.clone();
     let partition = if let Some(path) = &image.partition_table {
+        let bytes = read_bounded(path, 1024 * 1024)?;
+        ensure!(bytes.len() >= 2, "truncated partition table");
+        let table = PartitionTable::try_from(bytes.clone()).context("parse partition table")?;
+        target_app_partition = Some(select_app_partition(
+            &table,
+            target_app_partition.as_deref(),
+        )?);
         let snapshot = scratch.path().join("partitions.bin");
-        fs::write(&snapshot, read_bounded(path, 1024 * 1024)?)?;
+        fs::write(&snapshot, bytes)?;
         Some(snapshot)
     } else {
         None
@@ -298,11 +335,14 @@ pub fn convert(path: &Path, options: &Options) -> Result<Converted> {
             partition.as_deref(),
             bootloader.as_deref(),
             image.partition_table_offset,
-            image.target_app_partition.as_deref(),
+            target_app_partition.as_deref(),
         )
     })
     .map_err(|_| anyhow::anyhow!("espflash rejected malformed image data"))?
     .context("convert ELF image")?;
+    // The built-in table is private to espflash. Validate its selection too,
+    // before exporting any bytes or allowing an upload (including app-only).
+    select_app_partition(&format.partition_table(), target_app_partition.as_deref())?;
     let mut segments: Vec<_> = format
         .flash_segments()
         .map(|s| (s.addr, s.data.into_owned()))
