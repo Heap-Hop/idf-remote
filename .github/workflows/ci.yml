@@ -24,6 +24,17 @@ jobs:
       - name: Compare synthetic ELF images with espflash
         if: runner.os == 'Linux'
         run: ESPFLASH="$PWD/.artifacts/tools/bin/espflash" cargo test --locked --test elf_reference -- --ignored
+  desktop-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 scripts/prepare_release.py --output .artifacts/desktop-release
+      - run: cargo test --locked --all-features --manifest-path .artifacts/desktop-release/source/Cargo.toml
+      - run: cargo publish --dry-run --locked --manifest-path .artifacts/desktop-release/source/Cargo.toml
   android-core:
     runs-on: ubuntu-latest
     steps:

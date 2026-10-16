@@ -27,7 +27,9 @@ Install from crates.io on both computers using current stable Rust:
 cargo install idf-remote --locked
 ```
 
-For an Android USB host, follow the [Android setup](android/README.md) instead.
+The crates.io package targets desktop hosts. Android support remains available
+from this repository; follow the [Android setup](android/README.md).
+Maintainers can use the [release workflow](docs/RELEASING.md).
 
 **On the USB host**, connect the board and start the daemon:
 
