@@ -16,3 +16,8 @@ __pycache__/
 /android/native/target/
 /android/app/src/main/jniLibs/
 /android/local.properties
+/tests/firmware-rust-*/target/
+/tests/firmware-rust-*/.embuild/
+/tests/firmware-rust-*/sdkconfig
+/tests/firmware-rust-*/sdkconfig.old
+/tests/firmware-rust-*/sdkconfig.*.esp32s3

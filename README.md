@@ -27,7 +27,9 @@ Install from crates.io on both computers using current stable Rust:
 cargo install idf-remote --locked
 ```
 
-For an Android USB host, follow the [Android setup](android/README.md) instead.
+The crates.io package targets desktop hosts. Android support remains available
+from this repository; follow the [Android setup](android/README.md).
+Maintainers can use the [release workflow](docs/RELEASING.md).
 
 **On the USB host**, connect the board and start the daemon:
 
@@ -73,6 +75,28 @@ idfr plan
 idfr flash --image app
 idfr flash --plan plan.json --monitor
 ```
+
+Rust `no_std` (esp-hal) and `std` (esp-idf-sys) projects can also supply an ELF:
+
+```sh
+idfr plan --elf APP_ELF --chip esp32s3 --output PLAN_DIR
+idfr flash --plan PLAN_DIR/plan.json --monitor
+idfr flash --chip esp32s3 --elf APP_ELF --monitor
+```
+
+`PLAN_DIR` must be a new directory in an existing parent. It contains a portable
+`plan.json`, generated images, and `artifacts.json` with offsets, sizes, and
+SHA-256 digests, image sources, and the selected app partition. `flash --elf` uses
+temporary files unless `--output` is supplied.
+For esp-idf-sys, supply the matching build's support images explicitly:
+
+```sh
+idfr flash --chip esp32s3 --bootloader BOOTLOADER_BIN --partition-table PARTITION_TABLE_BIN --elf APP_ELF
+```
+
+ELF conversion uses espflash 4.5.0. Image options follow CLI > `espflash.toml` >
+built-in defaults; `--app-only` selects the app segment. See
+[ELF inputs](docs/ELF.md) for configuration, chip variants, and Cargo runners.
 
 Empty manifest images are skipped with a warning. Before writing, the daemon
 checks chip type, flash capacity, security state, and image ranges. Secure-boot

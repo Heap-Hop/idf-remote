@@ -10,3 +10,6 @@ pub mod application;
 pub mod mux;
 
 mod duplex;
+
+#[cfg(feature = "desktop")]
+pub mod elf;

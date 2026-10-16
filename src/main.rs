@@ -29,7 +29,7 @@ use std::{
 #[command(
     name = "idfr",
     version,
-    about = "Remote ESP-IDF flash and serial monitoring over HTTP"
+    about = "Remote ESP firmware flash and serial monitoring over HTTP"
 )]
 struct Cli {
     /// Machine-readable JSON / JSON Lines output.
@@ -86,12 +86,12 @@ enum Command {
     /// List daemon-managed devices without opening or resetting them.
     Devices,
     /// Validate artifacts without hardware; print a normalized FlashPlan.
-    #[command(group(ArgGroup::new("source").args(["plan", "build_dir"])))]
+    #[command(group(ArgGroup::new("source").args(["plan", "build_dir", "elf"])))]
     Plan(Source),
     /// Actively identify a chip through the ROM loader, then reset it.
     Probe(Port),
     /// Write and verify all segments; reset with the same port at monitor baud.
-    #[command(group(ArgGroup::new("source").args(["plan", "build_dir"])))]
+    #[command(group(ArgGroup::new("source").args(["plan", "build_dir", "elf"])))]
     Flash {
         #[command(flatten)]
         port: Port,
@@ -199,11 +199,39 @@ struct Source {
     #[arg(long, default_value = "./build")]
     build_dir: PathBuf,
     /// Flash only these named images from flasher_args.json (repeatable).
-    #[arg(long, conflicts_with = "plan")]
+    #[arg(long, conflicts_with_all = ["plan", "elf"])]
     image: Vec<String>,
-    /// Compatibility alias for --image app.
+    /// Flash only the app (ELF), or alias for --image app (ESP-IDF).
     #[arg(long, conflicts_with_all = ["image", "plan"])]
     app_only: bool,
+    /// ELF executable; append this option last in a Cargo runner command.
+    #[arg(long, requires = "chip")]
+    elf: Option<PathBuf>,
+    /// Target chip for ELF conversion (for example esp32s3).
+    #[arg(long, requires = "elf")]
+    chip: Option<String>,
+    /// Export an ELF plan and images into a new directory (required by plan).
+    #[arg(long, requires = "elf")]
+    output: Option<PathBuf>,
+    /// Explicit bootloader, including the esp-idf-sys build's bootloader.
+    #[arg(long, requires = "elf")]
+    bootloader: Option<PathBuf>,
+    /// CSV or binary partition table for ELF conversion.
+    #[arg(long, requires = "elf")]
+    partition_table: Option<PathBuf>,
+    #[arg(long, requires = "elf", value_parser = parse_u32_arg)]
+    partition_table_offset: Option<u32>,
+    #[arg(long, requires = "elf")]
+    target_app_partition: Option<String>,
+    #[arg(long, requires = "elf", value_parser = ["qio", "qout", "dio", "dout"])]
+    flash_mode: Option<String>,
+    #[arg(long, requires = "elf")]
+    flash_freq: Option<String>,
+    #[arg(long, requires = "elf")]
+    flash_size: Option<String>,
+    /// Crystal frequency; required for ESP32/C2 built-in bootloaders.
+    #[arg(long, requires = "elf", value_parser = ["26mhz", "32mhz", "40mhz", "48mhz"], ignore_case = true)]
+    xtal_freq: Option<String>,
 }
 
 #[derive(Args)]
@@ -224,6 +252,8 @@ struct Capture {
 struct CaptureOutput {
     options: CaptureOptions,
     raw: Option<std::fs::File>,
+    // Replay early events for wait/raw capture without emitting JSON twice.
+    json_printed_through: Option<idf_remote::wire::Cursor>,
 }
 
 struct FlashProgressWriter<W> {
@@ -454,11 +484,95 @@ impl Capture {
         Ok(CaptureOutput {
             options: CaptureOptions { timeout, wait },
             raw,
+            json_printed_through: None,
         })
     }
 }
 
-fn load(source: &Source) -> Result<(FlashPlan, PreparedPlan, Vec<idf_remote::wire::FlashWarning>)> {
+struct LoadedSource {
+    plan: FlashPlan,
+    prepared: PreparedPlan,
+    warnings: Vec<idf_remote::wire::FlashWarning>,
+    // Upload reads the converted files after load returns.
+    _scratch: Option<tempfile::TempDir>,
+}
+
+fn image_value<T: serde::de::DeserializeOwned>(
+    value: Option<String>,
+    name: &str,
+) -> Result<Option<T>> {
+    value
+        .map(|v| serde_json::from_value(v.into()).with_context(|| format!("invalid {name}")))
+        .transpose()
+}
+
+fn load(source: &Source) -> Result<LoadedSource> {
+    if let Some(path) = &source.elf {
+        use espflash::target::XtalFrequency;
+        let options = idf_remote::elf::Options {
+            chip: source
+                .chip
+                .as_deref()
+                .context("--chip is required with --elf")?
+                .parse()
+                .context("unsupported ESP chip")?,
+            image: idf_remote::elf::ImageOptions {
+                bootloader: source.bootloader.clone(),
+                partition_table: source.partition_table.clone(),
+                partition_table_offset: source.partition_table_offset,
+                target_app_partition: source.target_app_partition.clone(),
+            },
+            mode: image_value(source.flash_mode.clone(), "flash mode")?,
+            frequency: image_value(
+                source.flash_freq.as_ref().map(|v| {
+                    format!(
+                        "{}MHz",
+                        v.to_ascii_lowercase()
+                            .trim_end_matches("hz")
+                            .trim_end_matches('m')
+                    )
+                }),
+                "flash frequency",
+            )?,
+            size: source
+                .flash_size
+                .as_deref()
+                .map(|value| value.parse().context("invalid flash size"))
+                .transpose()?,
+            xtal: source
+                .xtal_freq
+                .as_ref()
+                .map(|v| match v.to_ascii_lowercase().as_str() {
+                    "26mhz" => XtalFrequency::_26Mhz,
+                    "32mhz" => XtalFrequency::_32Mhz,
+                    "48mhz" => XtalFrequency::_48Mhz,
+                    _ => XtalFrequency::_40Mhz,
+                }),
+            app_only: source.app_only,
+        };
+        let converted = idf_remote::elf::convert(path, &options)?;
+        let scratch = if source.output.is_none() {
+            Some(tempfile::tempdir()?)
+        } else {
+            None
+        };
+        let directory = source
+            .output
+            .clone()
+            .unwrap_or_else(|| scratch.as_ref().unwrap().path().join("images"));
+        converted.export(&directory)?;
+        converted.print_summary();
+        let mut plan = converted.plan;
+        for segment in &mut plan.segments {
+            segment.file = directory.join(&segment.file).canonicalize()?;
+        }
+        return Ok(LoadedSource {
+            plan,
+            prepared: converted.prepared,
+            warnings: Vec::new(),
+            _scratch: scratch,
+        });
+    }
     let (mut plan, base, warnings) = if let Some(path) = &source.plan {
         (
             FlashPlan::load(path)?,
@@ -498,7 +612,12 @@ fn load(source: &Source) -> Result<(FlashPlan, PreparedPlan, Vec<idf_remote::wir
     for segment in &mut plan.segments {
         segment.file = base.join(&segment.file).canonicalize()?;
     }
-    Ok((plan, prepared, warnings))
+    Ok(LoadedSource {
+        plan,
+        prepared,
+        warnings,
+        _scratch: None,
+    })
 }
 
 fn write_json(writer: &mut impl Write, value: &impl serde::Serialize) -> Result<()> {
@@ -1178,7 +1297,12 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Command::Plan(source) => {
-            let (plan, _, _) = load(&source)?;
+            ensure!(
+                source.elf.is_none() || source.output.is_some(),
+                "plan --elf requires --output DIR for persistent images"
+            );
+            let loaded = load(&source)?;
+            let plan = &loaded.plan;
             writeln!(
                 io::stdout().lock(),
                 "{}",
@@ -1202,8 +1326,13 @@ fn run(cli: Cli) -> Result<()> {
             monitor,
             capture,
         } => {
-            let (plan, prepared, warnings) = load(&source)?;
-            let output = capture.prepare()?;
+            let LoadedSource {
+                plan,
+                prepared,
+                warnings,
+                _scratch,
+            } = load(&source)?;
+            let mut output = capture.prepare()?;
             let device_id = http.resolve_device(&selector)?;
             let upload = idf_remote::wire::FlashUploadManifest::from_plan(
                 device_id,
@@ -1218,14 +1347,11 @@ fn run(cli: Cli) -> Result<()> {
             let capture_cursor = submitted.start_cursor.clone();
             let (operation, progress_cursor) = http.finish_flash(submitted, cli.json, &running)?;
             if monitor || capture.requested() {
+                output.json_printed_through = cli.json.then_some(progress_cursor);
                 run_capture(
                     &http,
                     operation.device_id.clone(),
-                    if cli.json {
-                        progress_cursor
-                    } else {
-                        capture_cursor
-                    },
+                    capture_cursor,
                     output,
                     CaptureMode::after_operation(
                         cli.json,
@@ -1709,7 +1835,11 @@ async fn capture_loop<W: Write>(
                 }
             }
             if mode.json_output {
-                write_json(&mut stdout.writer, &event)?;
+                if output.json_printed_through.as_ref().is_none_or(|printed| {
+                    printed.epoch != batch.cursor.epoch || event.seq > printed.after
+                }) {
+                    write_json(&mut stdout.writer, &event)?;
+                }
             } else if matches!(
                 event.kind.as_str(),
                 "disconnected" | "reconnecting" | "reconnected"
@@ -1991,6 +2121,7 @@ mod tests {
                 timeout: None,
             },
             raw: None,
+            json_printed_through: None,
         };
         let mut stdout = MonitorWriter::new(Vec::new(), false);
         let running = AtomicBool::new(true);

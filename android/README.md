@@ -24,6 +24,9 @@ on desktop. Kotlin never performs USB transfers.
 
 ## Build
 
+Build from this repository. The crates.io desktop package does not expose the
+`android-usb` feature or include its Git transport fork.
+
 Use JDK 17, Android SDK 35, NDK 28.2.13676358, and stable Rust:
 
 ```sh
