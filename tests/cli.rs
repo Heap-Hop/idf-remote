@@ -949,3 +949,203 @@ fn elf_default_partition_selection_skips_data_named_factory() {
         }
     }
 }
+
+#[test]
+fn elf_reports_builtin_sources_and_selected_app_partition() {
+    for app_only in [false, true] {
+        let project = elf_project();
+        let mut cmd = command();
+        cmd.current_dir(project.path()).args([
+            "--json", "plan", "--elf", "app.elf", "--chip", "esp32s3", "--output", "bundle",
+        ]);
+        if app_only {
+            cmd.arg("--app-only");
+        }
+        let output = cmd.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let metadata: Value = serde_json::from_slice(
+            &fs::read(project.path().join("bundle/artifacts.json")).unwrap(),
+        )
+        .unwrap();
+        for image in ["bootloader", "partition_table"] {
+            assert_eq!(
+                metadata["sources"][image],
+                json!({"kind":"built_in", "espflash_version":"4.5.0", "chip":"esp32s3"})
+            );
+        }
+        assert_eq!(
+            metadata["app_partition"],
+            json!({"name":"factory", "offset":0x10000, "size":0x3f0000})
+        );
+        assert_eq!(metadata["app_only"], app_only);
+        assert_eq!(
+            plan["segments"].as_array().unwrap().len(),
+            if app_only { 1 } else { 3 }
+        );
+        assert!(plan.get("sources").is_none());
+        let summary = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            summary.contains("bootloader       built-in (espflash 4.5.0, esp32s3)"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("partition table  built-in (espflash 4.5.0, esp32s3)"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("app partition    factory @ 0x10000, size 0x3f0000"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("note: using built-in bootloader and partition table defaults"),
+            "{summary}"
+        );
+        assert_eq!(summary.contains("not written"), app_only, "{summary}");
+    }
+}
+
+#[test]
+fn elf_reports_mixed_sources_and_cli_precedence_from_parent_config() {
+    let project = elf_project();
+    let seed = command()
+        .current_dir(project.path())
+        .args([
+            "plan", "--elf", "app.elf", "--chip", "esp32s3", "--output", "seed",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        seed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&seed.stderr)
+    );
+    let member = project.path().join("member");
+    fs::create_dir(&member).unwrap();
+    fs::copy(project.path().join("app.elf"), member.join("app.elf")).unwrap();
+    fs::copy(
+        project.path().join("seed/00000000.bin"),
+        member.join("boot.bin"),
+    )
+    .unwrap();
+    fs::write(member.join("parts.csv"), "nvs,data,nvs,0x9000,0x6000\nfactory,app,factory,0x20000,0x100000\nother,app,ota_0,0x120000,0x100000\n").unwrap();
+    let cwd = member.canonicalize().unwrap();
+    let config_file = project.path().join("espflash.toml");
+    // These paths resolve against the member CWD, not the config's directory.
+    fs::write(&config_file, "[idf]\nbootloader = 'boot.bin'\npartition_table = 'parts.csv'\ntarget_app_partition = 'other'\n").unwrap();
+    for cli_boot in [false, true] {
+        for cli_partition in [false, true] {
+            let bundle = format!("bundle-{cli_boot}-{cli_partition}");
+            let mut cmd = command();
+            cmd.current_dir(&member).args([
+                "plan", "--elf", "app.elf", "--chip", "esp32s3", "--output", &bundle,
+            ]);
+            if cli_boot {
+                cmd.args(["--bootloader", "boot.bin"]);
+            }
+            if cli_partition {
+                cmd.args(["--partition-table", "parts.csv"]);
+            }
+            let output = cmd.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let metadata: Value = serde_json::from_slice(
+                &fs::read(member.join(&bundle).join("artifacts.json")).unwrap(),
+            )
+            .unwrap();
+            let summary = String::from_utf8(output.stderr).unwrap();
+            for (image, file, cli) in [
+                ("bootloader", "boot.bin", cli_boot),
+                ("partition_table", "parts.csv", cli_partition),
+            ] {
+                let mut actual = metadata["sources"][image].clone();
+                let path = std::path::Path::new(actual["path"].as_str().unwrap());
+                assert!(path.is_absolute());
+                assert!(
+                    summary.contains(&format!(
+                        "{}: {}",
+                        if cli { "command line" } else { "image" },
+                        path.display()
+                    )),
+                    "{summary}"
+                );
+                // Canonical forms differ from current_dir on Windows and macOS.
+                actual["path"] = json!(path.canonicalize().unwrap());
+                let mut expected =
+                    json!({"kind":if cli {"command_line"} else {"config"}, "path":cwd.join(file)});
+                if !cli {
+                    let path = std::path::Path::new(actual["config_file"].as_str().unwrap());
+                    assert!(summary.contains(&path.display().to_string()), "{summary}");
+                    actual["config_file"] = json!(path.canonicalize().unwrap());
+                    expected["config_file"] = json!(config_file.canonicalize().unwrap());
+                }
+                assert_eq!(actual, expected);
+            }
+            assert!(!summary.contains("built-in"), "{summary}");
+            assert_eq!(
+                metadata["app_partition"],
+                json!({"name":"other", "offset":0x120000, "size":0x100000})
+            );
+        }
+    }
+    // Each image independently falls back to its built-in default.
+    for (setting, built_in, configured, label) in [
+        (
+            "partition_table = 'parts.csv'",
+            "bootloader",
+            "partition_table",
+            "bootloader",
+        ),
+        (
+            "bootloader = 'boot.bin'",
+            "partition_table",
+            "bootloader",
+            "partition table",
+        ),
+    ] {
+        fs::write(&config_file, format!("[idf]\n{setting}\n")).unwrap();
+        let bundle = format!("mixed-default-{built_in}");
+        let output = command()
+            .current_dir(&member)
+            .args([
+                "plan",
+                "--app-only",
+                "--elf",
+                "app.elf",
+                "--chip",
+                "esp32s3",
+                "--output",
+                &bundle,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: Value =
+            serde_json::from_slice(&fs::read(member.join(bundle).join("artifacts.json")).unwrap())
+                .unwrap();
+        assert_eq!(metadata["sources"][built_in]["kind"], "built_in");
+        assert_eq!(metadata["sources"][configured]["kind"], "config");
+        assert_eq!(metadata["app_only"], true);
+        let summary = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            summary.contains(&format!("note: using built-in {label} defaults")),
+            "{summary}"
+        );
+        assert!(
+            !summary.contains("bootloader and partition table defaults"),
+            "{summary}"
+        );
+        assert!(summary.contains("not written"), "{summary}");
+    }
+}

@@ -83,6 +83,15 @@ image's offset, size, and SHA-256; the same summary is printed to stderr. The
 existing plan JSON stays compatible. The normal four-byte upload padding is
 applied later, without changing the exported image files.
 
+The stderr summary and `artifacts.json` also report each support image's source:
+`command_line`, `config` (with the config file), or `built_in` (with espflash
+version and chip). File sources record absolute paths resolved against the
+conversion CWD; these are audit metadata, not paths used to replay the bundle.
+`app_partition` records the selected name, offset, and capacity, and `app_only`
+records whether supporting images are omitted. Built-in fallback is explicitly
+noted in the summary. In app-only mode, reported support images are used for
+conversion but are not written to the device.
+
 `flash --elf` can export a bundle with `--output`, or keep files in a temporary
 directory until the operation finishes. Both modes validate images before HTTP.
 The backend preserves supplied bytes; ELF header and digest rewriting happens

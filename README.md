@@ -84,7 +84,8 @@ idfr flash --chip esp32s3 --elf APP_ELF --monitor
 
 `PLAN_DIR` must be a new directory in an existing parent. It contains a portable
 `plan.json`, generated images, and `artifacts.json` with offsets, sizes, and
-SHA-256 digests. `flash --elf` uses temporary files unless `--output` is supplied.
+SHA-256 digests, image sources, and the selected app partition. `flash --elf` uses
+temporary files unless `--output` is supplied.
 For esp-idf-sys, supply the matching build's support images explicitly:
 
 ```sh

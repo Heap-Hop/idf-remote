@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use esp_idf_part::{PartitionTable, Type};
+use esp_idf_part::{Partition, PartitionTable, Type};
 use espflash::{
     flasher::{FlashData, FlashFrequency, FlashMode, FlashSettings as ImageSettings, FlashSize},
     image_format::idf::IdfBootloaderFormat,
@@ -104,13 +104,13 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn load_config() -> Result<Config> {
+fn load_config() -> Result<(Config, Option<PathBuf>)> {
     let global = directories::ProjectDirs::from("rs", "esp", "espflash");
     let Some(path) = config_path(
         &std::env::current_dir()?,
         global.as_ref().map(|d| d.config_dir()),
     ) else {
-        return Ok(Config::default());
+        return Ok((Config::default(), None));
     };
     let bytes = read_bounded(&path, 1024 * 1024)?;
     let config: Config = toml::from_str(std::str::from_utf8(&bytes)?)
@@ -124,7 +124,84 @@ fn load_config() -> Result<Config> {
             "warning: espflash local transport settings are not used; select the remote device and baud rate with idfr options"
         );
     }
-    Ok(config)
+    Ok((config, Some(path)))
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ImageSource {
+    CommandLine {
+        path: PathBuf,
+    },
+    Config {
+        config_file: PathBuf,
+        path: PathBuf,
+    },
+    BuiltIn {
+        espflash_version: &'static str,
+        chip: String,
+    },
+}
+
+impl ImageSource {
+    fn description(&self) -> String {
+        match self {
+            Self::CommandLine { path } => format!("command line: {}", path.display()),
+            Self::Config { config_file, path } => format!(
+                "config: {}; image: {}",
+                config_file.display(),
+                path.display()
+            ),
+            Self::BuiltIn {
+                espflash_version,
+                chip,
+            } => format!("built-in (espflash {espflash_version}, {chip})"),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ImageSources {
+    bootloader: ImageSource,
+    partition_table: ImageSource,
+}
+
+#[derive(Serialize)]
+struct AppPartition {
+    name: String,
+    offset: u32,
+    size: u32,
+}
+
+// Resolve the file and its provenance together. Config image paths remain
+// relative to CWD; reporting uses the same absolute path that conversion reads.
+fn resolve_image(
+    cli: Option<&Path>,
+    configured: Option<&Path>,
+    config_file: Option<&Path>,
+    chip: Chip,
+) -> Result<(Option<PathBuf>, ImageSource)> {
+    let Some(path) = cli.or(configured) else {
+        return Ok((
+            None,
+            ImageSource::BuiltIn {
+                espflash_version: "4.5.0",
+                chip: chip.to_string(),
+            },
+        ));
+    };
+    let path = std::env::current_dir()?.join(path);
+    let source = if cli.is_some() {
+        ImageSource::CommandLine { path: path.clone() }
+    } else {
+        ImageSource::Config {
+            config_file: config_file
+                .context("missing source config path")?
+                .to_owned(),
+            path: path.clone(),
+        }
+    };
+    Ok((Some(path), source))
 }
 
 fn validate_bootloader(bytes: &[u8], chip: Chip) -> Result<()> {
@@ -228,7 +305,10 @@ fn validate_elf(bytes: &[u8], chip: Chip) -> Result<()> {
     Ok(())
 }
 
-fn select_app_partition(table: &PartitionTable, target: Option<&str>) -> Result<String> {
+fn select_app_partition<'a>(
+    table: &'a PartitionTable,
+    target: Option<&str>,
+) -> Result<&'a Partition> {
     let partition = if let Some(name) = target {
         table
             .find(name)
@@ -245,7 +325,7 @@ fn select_app_partition(table: &PartitionTable, target: Option<&str>) -> Result<
         "target partition {:?} is not an app partition",
         partition.name()
     );
-    Ok(partition.name())
+    Ok(partition)
 }
 
 /// Owns converted bytes. Conversion and validation complete before export or HTTP.
@@ -253,21 +333,32 @@ pub struct Converted {
     pub plan: FlashPlan,
     pub prepared: PreparedPlan,
     bytes: Vec<Vec<u8>>,
+    sources: ImageSources,
+    app_partition: AppPartition,
+    app_only: bool,
 }
 
 pub fn convert(path: &Path, options: &Options) -> Result<Converted> {
-    let config = load_config()?;
+    let (config, config_file) = load_config()?;
+    let (bootloader, bootloader_source) = resolve_image(
+        options.image.bootloader.as_deref(),
+        config.idf_format_args.bootloader.as_deref(),
+        config_file.as_deref(),
+        options.chip,
+    )?;
+    let (partition_table, partition_source) = resolve_image(
+        options.image.partition_table.as_deref(),
+        config.idf_format_args.partition_table.as_deref(),
+        config_file.as_deref(),
+        options.chip,
+    )?;
+    let sources = ImageSources {
+        bootloader: bootloader_source,
+        partition_table: partition_source,
+    };
     let image = ImageOptions {
-        bootloader: options
-            .image
-            .bootloader
-            .clone()
-            .or(config.idf_format_args.bootloader),
-        partition_table: options
-            .image
-            .partition_table
-            .clone()
-            .or(config.idf_format_args.partition_table),
+        bootloader,
+        partition_table,
         partition_table_offset: options
             .image
             .partition_table_offset
@@ -317,10 +408,8 @@ pub fn convert(path: &Path, options: &Options) -> Result<Converted> {
         let bytes = read_bounded(path, 1024 * 1024)?;
         ensure!(bytes.len() >= 2, "truncated partition table");
         let table = PartitionTable::try_from(bytes.clone()).context("parse partition table")?;
-        target_app_partition = Some(select_app_partition(
-            &table,
-            target_app_partition.as_deref(),
-        )?);
+        target_app_partition =
+            Some(select_app_partition(&table, target_app_partition.as_deref())?.name());
         let snapshot = scratch.path().join("partitions.bin");
         fs::write(&snapshot, bytes)?;
         Some(snapshot)
@@ -342,7 +431,13 @@ pub fn convert(path: &Path, options: &Options) -> Result<Converted> {
     .context("convert ELF image")?;
     // The built-in table is private to espflash. Validate its selection too,
     // before exporting any bytes or allowing an upload (including app-only).
-    select_app_partition(&format.partition_table(), target_app_partition.as_deref())?;
+    let table = format.partition_table();
+    let selected = select_app_partition(&table, target_app_partition.as_deref())?;
+    let app_partition = AppPartition {
+        name: selected.name(),
+        offset: selected.offset(),
+        size: selected.size(),
+    };
     let mut segments: Vec<_> = format
         .flash_segments()
         .map(|s| (s.addr, s.data.into_owned()))
@@ -390,6 +485,9 @@ pub fn convert(path: &Path, options: &Options) -> Result<Converted> {
         plan,
         prepared,
         bytes,
+        sources,
+        app_partition,
+        app_only: options.app_only,
     })
 }
 
@@ -419,7 +517,12 @@ impl Converted {
             }
             fs::write(
                 directory.join("artifacts.json"),
-                serde_json::to_vec_pretty(&serde_json::json!({"segments": artifacts}))?,
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "segments": artifacts,
+                    "sources": self.sources,
+                    "app_partition": self.app_partition,
+                    "app_only": self.app_only,
+                }))?,
             )?;
             fs::write(
                 directory.join("plan.json"),
@@ -434,6 +537,30 @@ impl Converted {
     }
 
     pub fn print_summary(&self) {
+        eprintln!("bootloader       {}", self.sources.bootloader.description());
+        eprintln!(
+            "partition table  {}",
+            self.sources.partition_table.description()
+        );
+        eprintln!(
+            "app partition    {} @ {:#x}, size {:#x}",
+            self.app_partition.name, self.app_partition.offset, self.app_partition.size
+        );
+        let defaults: Vec<_> = [
+            ("bootloader", &self.sources.bootloader),
+            ("partition table", &self.sources.partition_table),
+        ]
+        .into_iter()
+        .filter_map(|(name, source)| matches!(source, ImageSource::BuiltIn { .. }).then_some(name))
+        .collect();
+        if !defaults.is_empty() {
+            eprintln!("note: using built-in {} defaults", defaults.join(" and "));
+        }
+        if self.app_only {
+            eprintln!(
+                "note: app-only; bootloader and partition table are used for conversion, not written"
+            );
+        }
         for (segment, bytes) in self.plan.segments.iter().zip(&self.bytes) {
             eprintln!(
                 "{:#010x}  {} bytes  sha256 {}",
