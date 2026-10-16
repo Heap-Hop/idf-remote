@@ -534,10 +534,11 @@ fn load(source: &Source) -> Result<LoadedSource> {
                 }),
                 "flash frequency",
             )?,
-            size: image_value(
-                source.flash_size.as_ref().map(|v| v.to_ascii_uppercase()),
-                "flash size",
-            )?,
+            size: source
+                .flash_size
+                .as_deref()
+                .map(|value| value.parse().context("invalid flash size"))
+                .transpose()?,
             xtal: source
                 .xtal_freq
                 .as_ref()

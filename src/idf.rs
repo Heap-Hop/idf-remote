@@ -72,7 +72,7 @@ pub fn import(path: &Path, selected_images: &[String]) -> Result<Import> {
     let after = manifest.extra_esptool_args.after.replace('-', "_");
     ensure!(
         before == "default_reset" && after == "hard_reset" && manifest.extra_esptool_args.stub,
-        "phase 1 requires default_reset, hard_reset and stub=true; custom reset/no-stub manifests are not supported"
+        "manifest requires default_reset, hard_reset and stub=true; custom reset/no-stub manifests are not supported"
     );
     for (name, image) in &manifest.images {
         if name.contains("encrypt")

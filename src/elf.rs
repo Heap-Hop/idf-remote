@@ -379,11 +379,9 @@ pub fn convert(path: &Path, options: &Options) -> Result<Converted> {
             "this chip requires --xtal-freq when using the built-in bootloader"
         );
     }
-    let xtal = options.xtal.unwrap_or(if options.chip == Chip::Esp32h2 {
-        XtalFrequency::_32Mhz
-    } else {
-        XtalFrequency::_40Mhz
-    });
+    let xtal = options
+        .xtal
+        .unwrap_or_else(|| options.chip.default_xtal_frequency());
     let settings = ImageSettings::new(
         options.mode.or(config.flash.mode),
         Some(options.size.or(config.flash.size).unwrap_or_default()),

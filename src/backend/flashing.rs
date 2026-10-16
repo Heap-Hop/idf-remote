@@ -67,7 +67,7 @@ impl DeviceSession for Session {
         let chip = validate(plan)?;
         ensure!(baud >= 115200, "flash baud must be at least 115200");
         self.with_flasher(Some(chip), baud, |flasher| {
-            ensure!(!flasher.secure_download_mode(), "secure download mode is outside phase 1 support");
+            ensure!(!flasher.secure_download_mode(), "secure download mode is not supported");
             let security = flasher.security_info().context("read security state before writing")?;
             ensure!(security.flags & 1 == 0 && security.flash_crypt_cnt.count_ones() % 2 == 0,
                 "secure boot / flash encryption provisioning is not supported");
@@ -243,7 +243,7 @@ pub(super) fn validate_detected_size(plan: &PreparedPlan, chip: Chip, detected: 
             if segment.offset == chip.boot_address() {
                 ensure!(
                     segment.data[3] >> 4 == header_size,
-                    "flash_size=detect requires changing this bootloader header; phase 1 preserves bytes. Rebuild for the detected {detected}-byte flash or explicitly choose keep"
+                    "flash_size=detect requires changing this bootloader header; the backend preserves supplied bytes. Rebuild for the detected {detected}-byte flash or explicitly choose keep"
                 );
             }
         }
